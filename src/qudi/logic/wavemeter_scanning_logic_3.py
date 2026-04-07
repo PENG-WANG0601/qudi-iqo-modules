@@ -117,8 +117,8 @@ class WavemeterLogic(LogicBase):
         self.rawhisto = np.zeros(self._bins)
         self.sumhisto = np.ones(self._bins) * 1.0e-10
 
-        self._time_series_logic.sigStopped.connect(
-            self.stop_scanning, QtCore.Qt.QueuedConnection)
+        self._time_series_logic.sigStatusChanged.connect(
+            self._on_time_series_status_changed, QtCore.Qt.QueuedConnection)
         return
 
     def on_deactivate(self):
@@ -130,8 +130,14 @@ class WavemeterLogic(LogicBase):
         elif self.module_state() == 'locked':
             self.stop_scanning()
 
-        self._time_series_logic.sigStopped.disconnect()
+        self._time_series_logic.sigStatusChanged.disconnect(self._on_time_series_status_changed)
         return
+
+    @QtCore.Slot(bool, bool)
+    def _on_time_series_status_changed(self, running: bool, recording: bool) -> None:
+        """Stop wavemeter scanning when the time series reader stops externally."""
+        if not running and self.module_state() == 'locked':
+            self.stop_scanning()
 
     @property
     def streamer_constraints(self) -> DataInStreamConstraints:
