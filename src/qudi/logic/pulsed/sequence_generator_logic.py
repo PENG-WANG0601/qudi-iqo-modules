@@ -103,7 +103,9 @@ class SequenceGeneratorLogic(LogicBase):
                  'laser_length': 3e-6,
                  'laser_delay': 500e-9,
                  'wait_time': 1e-6,
-                 'analog_trigger_voltage': 0.0}
+                 'analog_trigger_voltage': 0.4,
+                 'green_laser_voltage': 0.4,
+                 'third_laser_voltage': 0.4}
     )
 
     # The created pulse objects (PulseBlock, PulseBlockEnsemble, PulseSequence) are saved in
@@ -1773,7 +1775,7 @@ class SequenceGeneratorLogic(LogicBase):
                                 'has failed.\nTarget number of samples was {0:d}.\nfinal number of '
                                 'samples is {1:d}.\nThis is probably due to a rounding error in '
                                 'SequenceGeneratorLogic.sample_pulse_block_ensemble.'
-                                ''.format(target_total_samples, ensemble_info['number_of_samples']))
+                                ''.format(int(target_total_samples), int(ensemble_info['number_of_samples'])))
                 else:
                     self.log.warn('Extending waveform {0} by {2} bins. New length {1}.'.format(
                         ensemble.name, ensemble_info['number_of_samples'], extension_samples))
@@ -2052,9 +2054,17 @@ class SequenceGeneratorLogic(LogicBase):
                     offset_bin = 0  # Keep the offset at 0
 
                 # Only sample ensembles if they have not already been sampled
+                force_resample = False
+                existing_info = self.get_ensemble(name_tag).sampling_information
+                if existing_info and 'waveforms' in existing_info:
+                    if not set(existing_info['waveforms']).issubset(set(self.pulsegenerator().get_waveform_names())):
+                        force_resample = True
+                        self.log.debug('Some previously sampled waveforms for ensemble "{0}" are missing on device. Resampling.'.format(name_tag))
+
                 if sequence.rotating_frame or \
-                        not self.get_ensemble(name_tag).sampling_information or \
-                        self.get_ensemble(name_tag).sampling_information['pulse_generator_settings'] != self.pulse_generator_settings:
+                        not existing_info or \
+                        existing_info['pulse_generator_settings'] != self.pulse_generator_settings or \
+                        force_resample:
 
                     offset_bin, waveform_list, ensemble_info = self.sample_pulse_block_ensemble(
                         ensemble=seq_step.ensemble,

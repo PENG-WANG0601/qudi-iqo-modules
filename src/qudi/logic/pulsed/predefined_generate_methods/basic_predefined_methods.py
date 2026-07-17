@@ -1597,3 +1597,703 @@ class BasicPredefinedGenerator(PredefinedGeneratorBase):
         # Append PulseSequence to created_sequences list
         created_sequences.append(t1_sequence)
         return created_blocks, created_ensembles, created_sequences
+
+    # def generate_resonant_decay_sequence(self, name='resonant_decay', repump_total=1.0e-3,
+    #                                     repump_length=1.0e-6, waiting_length=1.0e-7,
+    #                                     decay_length=1.0e-6, record_length=1.0e-1):
+    #     """ Charge initialization and resonant decay using a PulseSequence for AWG8195 compatibility.
+    #     Operates in UNGATED mode: d_ch2 fires only during the repump block; its rising edge
+    #     triggers the MCS8A to start a time trace. Waiting and decay blocks have no d_ch2.
+
+    #     All AWG blocks are short (≤ repump_length, ≤ decay_length). Long durations are achieved
+    #     by repeating blocks in the AWG sequence table — no large waveform is ever transferred.
+    #     Block lengths are snapped to exact AWG granularity multiples to prevent idle_extension.
+
+    #       Block 1 — green_repump   (a_ch2 DC + d_ch2 trigger rising edge → MCS8A start)
+    #                 repeated repump_reps = round(repump_total / repump_length) times
+    #       Block 2 — waiting        (all idle, d_ch2 LOW)         [once]
+    #       Block 3 — resonant_decay (d_ch1 only, no d_ch2)
+    #                 repeated decay_reps = round(record_length / decay_length) times
+    #       Block 4 — end idle       (all low)                     [once, then loop to step 1]
+
+    #     @param str   name:           Name of the PulseSequence
+    #     @param float repump_total:   Total green repump duration per cycle [s]
+    #     @param float repump_length:  Single repump AWG block duration [s]; snapped to AWG bins (≤1 µs)
+    #     @param float waiting_length: Idle block duration [s]; snapped to AWG bins
+    #     @param float decay_length:   Single decay AWG block duration [s]; snapped to AWG bins (≤1 µs)
+    #     @param float record_length:  Total decay recording time [s]
+
+    #     @return: created_blocks, created_ensembles, created_sequences
+    #     """
+    #     created_blocks = list()
+    #     created_ensembles = list()
+    #     created_sequences = list()
+
+    #     gran_s = int(self.pulse_generator_constraints.waveform_length.step)
+    #     min_s  = int(self.pulse_generator_constraints.waveform_length.min)
+    #     sr     = self.sample_rate
+
+    #     def _bins(length_s):
+    #         return max(min_s, int(round(length_s * sr / gran_s)) * gran_s)
+
+    #     repump_bins  = _bins(repump_length)
+    #     waiting_bins = _bins(waiting_length)
+    #     decay_bins   = _bins(decay_length)
+
+    #     repump_s  = repump_bins  / sr
+    #     waiting_s = waiting_bins / sr
+    #     decay_s   = decay_bins   / sr
+
+    #     # The M8195A sequence table supports 32-bit repetition counts (~4.3 billion).
+    #     # Keep block lengths short (≤1 µs) so waveform data transferred is small;
+    #     # large rep counts are handled in hardware at no extra cost.
+    #     repump_reps = max(1, int(round(repump_total / repump_s)))
+    #     decay_reps  = max(1, int(round(record_length / decay_s)))
+
+    #     # --- Block 1: Green repump (a_ch2 DC + d_ch2 gate) ---
+    #     repump_element = self._get_green_laser_element(length=repump_s, increment=0,
+    #                                                    channels=['d_ch2'])
+    #     repump_block = PulseBlock(name='{0}_repump'.format(name))
+    #     repump_block.append(repump_element)
+    #     created_blocks.append(repump_block)
+    #     repump_ensemble = PulseBlockEnsemble(name='{0}_repump'.format(name), rotating_frame=False)
+    #     repump_ensemble.append((repump_block.name, 0))
+    #     created_ensembles.append(repump_ensemble)
+
+    #     # --- Block 2: Waiting (all idle — d_ch2 goes LOW after repump, MCS8A keeps recording) ---
+    #     waiting_element = self._get_idle_element(length=waiting_s, increment=0)
+    #     waiting_block = PulseBlock(name='{0}_waiting'.format(name))
+    #     waiting_block.append(waiting_element)
+    #     created_blocks.append(waiting_block)
+    #     waiting_ensemble = PulseBlockEnsemble(name='{0}_waiting'.format(name), rotating_frame=False)
+    #     waiting_ensemble.append((waiting_block.name, 0))
+    #     created_ensembles.append(waiting_ensemble)
+
+    #     # --- Block 3: Resonant decay (d_ch1 only — ungated, no d_ch2) ---
+    #     decay_element = self._get_trigger_element(length=decay_s, increment=0,
+    #                                               channels=['d_ch1'])
+    #     decay_block = PulseBlock(name='{0}_decay'.format(name))
+    #     decay_block.append(decay_element)
+    #     created_blocks.append(decay_block)
+    #     decay_ensemble = PulseBlockEnsemble(name='{0}_decay'.format(name), rotating_frame=False)
+    #     decay_ensemble.append((decay_block.name, 0))
+    #     created_ensembles.append(decay_ensemble)
+
+    #     # --- Block 4: End-of-cycle idle (all low — d_ch2 falling edge) ---
+    #     end_element = self._get_idle_element(length=waiting_s, increment=0)
+    #     end_block = PulseBlock(name='{0}_end'.format(name))
+    #     end_block.append(end_element)
+    #     created_blocks.append(end_block)
+    #     end_ensemble = PulseBlockEnsemble(name='{0}_end'.format(name), rotating_frame=False)
+    #     end_ensemble.append((end_block.name, 0))
+    #     created_ensembles.append(end_ensemble)
+
+    #     # --- Build PulseSequence ---
+    #     decay_sequence = PulseSequence(name=name, rotating_frame=False)
+
+    #     decay_sequence.append(repump_ensemble.name)
+    #     decay_sequence[-1].repetitions = repump_reps - 1
+
+    #     decay_sequence.append(waiting_ensemble.name)
+    #     decay_sequence[-1].repetitions = 0
+
+    #     decay_sequence.append(decay_ensemble.name)
+    #     decay_sequence[-1].repetitions = decay_reps - 1
+
+    #     decay_sequence.append(end_ensemble.name)
+    #     decay_sequence[-1].repetitions = 0
+    #     decay_sequence[-1].go_to = 1
+
+    #     decay_sequence.refresh_parameters()
+
+    #     total_counting_length = repump_reps * repump_s + waiting_s + decay_reps * decay_s
+    #     decay_sequence.measurement_information['alternating'] = False
+    #     decay_sequence.measurement_information['laser_ignore_list'] = list()
+    #     decay_sequence.measurement_information['controlled_variable'] = [0]
+    #     decay_sequence.measurement_information['units'] = ('', '')
+    #     decay_sequence.measurement_information['labels'] = ('Repetition', 'Signal')
+    #     decay_sequence.measurement_information['number_of_lasers'] = 1
+    #     decay_sequence.measurement_information['counting_length'] = total_counting_length
+
+    #     created_sequences.append(decay_sequence)
+    #     return created_blocks, created_ensembles, created_sequences
+
+    # def generate_resonant_decay_rest_sequence(self, name='resonant_decay_rest', repump_total=1.0e-3,
+    #                                           repump_length=1.0e-6, waiting_length=1.0e-7,
+    #                                           decay_length=1.0e-6, record_length_1=1.0e-3,
+    #                                           rest_total=100.0e-3, rest_length=1.0e-3,
+    #                                           record_length_2=1.0e-3):
+    #     """ Resonant decay sequence with an idle rest inserted between two decay phases.
+
+    #     Operates in UNGATED mode: d_ch2 fires only during the repump block; its rising edge
+    #     triggers the MCS8A to start a time trace.
+
+    #     Structure (loops continuously via go_to=1):
+    #       Block 1 — repump:   (a_ch2 DC + d_ch2 trigger)  × repump_reps
+    #       Block 2 — waiting:  (idle)                       × 1
+    #       Block 3 — decay_1:  (d_ch1 only)                 × decay_reps_1
+    #       Block 4 — rest:     (idle)                       × rest_reps
+    #       Block 5 — decay_2:  (d_ch1 only)                 × decay_reps_2
+    #       Block 6 — end:      (idle)                       × 1  → go_to=1
+
+    #       repump_reps  = round(repump_total  / repump_s)
+    #       decay_reps_1 = round(record_length_1 / decay_s)
+    #       rest_reps    = round(rest_total    / rest_s)
+    #       decay_reps_2 = round(record_length_2 / decay_s)
+
+    #     MCS8A time trace (from d_ch2 trigger at t=0):
+    #       [repump_total] [waiting] [record_length_1] [rest_total] [record_length_2]
+
+    #     @param str   name:            Name of the PulseSequence
+    #     @param float repump_total:    Total green repump duration per cycle [s]
+    #     @param float repump_length:   Single repump AWG block duration [s]; snapped to AWG bins
+    #     @param float waiting_length:  Idle waiting block duration [s]; snapped to AWG bins
+    #     @param float decay_length:    Single decay AWG block duration [s]; snapped to AWG bins (shared by both phases)
+    #     @param float record_length_1: Total resonant decay duration before rest [s]
+    #     @param float rest_total:      Total idle rest duration [s]
+    #     @param float rest_length:     Single rest AWG block duration [s]; snapped to AWG bins
+    #     @param float record_length_2: Total resonant decay duration after rest [s]
+
+    #     @return: created_blocks, created_ensembles, created_sequences
+    #     """
+    #     created_blocks = list()
+    #     created_ensembles = list()
+    #     created_sequences = list()
+
+    #     gran_s = int(self.pulse_generator_constraints.waveform_length.step)
+    #     min_s  = int(self.pulse_generator_constraints.waveform_length.min)
+    #     sr     = self.sample_rate
+
+    #     def _bins(length_s):
+    #         return max(min_s, int(round(length_s * sr / gran_s)) * gran_s)
+
+    #     repump_s  = _bins(repump_length)  / sr
+    #     waiting_s = _bins(waiting_length) / sr
+    #     decay_s   = _bins(decay_length)   / sr
+    #     rest_s    = _bins(rest_length)    / sr
+
+    #     repump_reps  = max(1, int(round(repump_total    / repump_s)))
+    #     decay_reps_1 = max(1, int(round(record_length_1 / decay_s)))
+    #     rest_reps    = max(1, int(round(rest_total      / rest_s)))
+    #     decay_reps_2 = max(1, int(round(record_length_2 / decay_s)))
+
+    #     # --- Block 1: Green repump (a_ch2 DC + d_ch2 trigger) ---
+    #     repump_element = self._get_green_laser_element(length=repump_s, increment=0,
+    #                                                    channels=['d_ch2'])
+    #     repump_block = PulseBlock(name='{0}_repump'.format(name))
+    #     repump_block.append(repump_element)
+    #     created_blocks.append(repump_block)
+    #     repump_ensemble = PulseBlockEnsemble(name='{0}_repump'.format(name), rotating_frame=False)
+    #     repump_ensemble.append((repump_block.name, 0))
+    #     created_ensembles.append(repump_ensemble)
+
+    #     # --- Block 2: Waiting (idle) ---
+    #     waiting_element = self._get_idle_element(length=waiting_s, increment=0)
+    #     waiting_block = PulseBlock(name='{0}_waiting'.format(name))
+    #     waiting_block.append(waiting_element)
+    #     created_blocks.append(waiting_block)
+    #     waiting_ensemble = PulseBlockEnsemble(name='{0}_waiting'.format(name), rotating_frame=False)
+    #     waiting_ensemble.append((waiting_block.name, 0))
+    #     created_ensembles.append(waiting_ensemble)
+
+    #     # --- Block 3: Decay phase 1 (d_ch1 only) ---
+    #     decay1_element = self._get_trigger_element(length=decay_s, increment=0,
+    #                                                channels=['d_ch1'])
+    #     decay1_block = PulseBlock(name='{0}_decay1'.format(name))
+    #     decay1_block.append(decay1_element)
+    #     created_blocks.append(decay1_block)
+    #     decay1_ensemble = PulseBlockEnsemble(name='{0}_decay1'.format(name), rotating_frame=False)
+    #     decay1_ensemble.append((decay1_block.name, 0))
+    #     created_ensembles.append(decay1_ensemble)
+
+    #     # --- Block 4: Idle rest (all low) ---
+    #     rest_element = self._get_idle_element(length=rest_s, increment=0)
+    #     rest_block = PulseBlock(name='{0}_rest'.format(name))
+    #     rest_block.append(rest_element)
+    #     created_blocks.append(rest_block)
+    #     rest_ensemble = PulseBlockEnsemble(name='{0}_rest'.format(name), rotating_frame=False)
+    #     rest_ensemble.append((rest_block.name, 0))
+    #     created_ensembles.append(rest_ensemble)
+
+    #     # --- Block 5: Decay phase 2 (d_ch1 only) ---
+    #     decay2_element = self._get_trigger_element(length=decay_s, increment=0,
+    #                                                channels=['d_ch1'])
+    #     decay2_block = PulseBlock(name='{0}_decay2'.format(name))
+    #     decay2_block.append(decay2_element)
+    #     created_blocks.append(decay2_block)
+    #     decay2_ensemble = PulseBlockEnsemble(name='{0}_decay2'.format(name), rotating_frame=False)
+    #     decay2_ensemble.append((decay2_block.name, 0))
+    #     created_ensembles.append(decay2_ensemble)
+
+    #     # --- Block 6: End idle ---
+    #     end_element = self._get_idle_element(length=waiting_s, increment=0)
+    #     end_block = PulseBlock(name='{0}_end'.format(name))
+    #     end_block.append(end_element)
+    #     created_blocks.append(end_block)
+    #     end_ensemble = PulseBlockEnsemble(name='{0}_end'.format(name), rotating_frame=False)
+    #     end_ensemble.append((end_block.name, 0))
+    #     created_ensembles.append(end_ensemble)
+
+    #     # --- Build PulseSequence ---
+    #     decay_sequence = PulseSequence(name=name, rotating_frame=False)
+
+    #     decay_sequence.append(repump_ensemble.name)
+    #     decay_sequence[-1].repetitions = repump_reps - 1
+
+    #     decay_sequence.append(waiting_ensemble.name)
+    #     decay_sequence[-1].repetitions = 0
+
+    #     decay_sequence.append(decay1_ensemble.name)
+    #     decay_sequence[-1].repetitions = decay_reps_1 - 1
+
+    #     decay_sequence.append(rest_ensemble.name)
+    #     decay_sequence[-1].repetitions = rest_reps - 1
+
+    #     decay_sequence.append(decay2_ensemble.name)
+    #     decay_sequence[-1].repetitions = decay_reps_2 - 1
+
+    #     decay_sequence.append(end_ensemble.name)
+    #     decay_sequence[-1].repetitions = 0
+    #     decay_sequence[-1].go_to = 1
+
+    #     decay_sequence.refresh_parameters()
+
+    #     total_counting_length = (repump_reps * repump_s + waiting_s
+    #                              + decay_reps_1 * decay_s
+    #                              + rest_reps * rest_s
+    #                              + decay_reps_2 * decay_s)
+    #     decay_sequence.measurement_information['alternating'] = False
+    #     decay_sequence.measurement_information['laser_ignore_list'] = list()
+    #     decay_sequence.measurement_information['controlled_variable'] = [0]
+    #     decay_sequence.measurement_information['units'] = ('', '')
+    #     decay_sequence.measurement_information['labels'] = ('Repetition', 'Signal')
+    #     decay_sequence.measurement_information['number_of_lasers'] = 1
+    #     decay_sequence.measurement_information['counting_length'] = total_counting_length
+
+    #     created_sequences.append(decay_sequence)
+    #     return created_blocks, created_ensembles, created_sequences
+
+    # def generate_dual_decay_sequence(self, name='dual_decay', repump_total=1.0e-3,
+    #                                 repump_length=1.0e-6, waiting_length=1.0e-7,
+    #                                 decay_length=1.0e-6, record_length=1.0e-1):
+    #     """ Charge initialization and dual-laser decay using a PulseSequence for AWG8195 compatibility.
+    #     Operates in UNGATED mode: d_ch2 fires only during the repump block; its rising edge
+    #     triggers the MCS8A to start a time trace. Waiting and decay blocks have no d_ch2.
+
+    #     Same structure as generate_resonant_decay_sequence but phase 3 uses both
+    #     green (a_ch2 DC) and resonant (d_ch1) lasers simultaneously.
+
+    #       Block 1 — green_repump (a_ch2 DC + d_ch2 trigger rising edge → MCS8A start)
+    #                 repeated repump_reps = round(repump_total / repump_length) times
+    #       Block 2 — waiting      (all idle, d_ch2 LOW)            [once]
+    #       Block 3 — dual_decay   (a_ch2 DC + d_ch1 only, no d_ch2)
+    #                 repeated decay_reps = round(record_length / decay_length) times
+    #       Block 4 — end idle     (all low)                        [once, then loop to step 1]
+
+    #     @param str   name:           Name of the PulseSequence
+    #     @param float repump_total:   Total green repump duration per cycle [s]
+    #     @param float repump_length:  Single repump AWG block duration [s]; snapped to AWG bins (≤1 µs)
+    #     @param float waiting_length: Idle block duration [s]; snapped to AWG bins
+    #     @param float decay_length:   Single dual-decay AWG block duration [s]; snapped to AWG bins (≤1 µs)
+    #     @param float record_length:  Total decay recording time [s]
+
+    #     @return: created_blocks, created_ensembles, created_sequences
+    #     """
+    #     created_blocks = list()
+    #     created_ensembles = list()
+    #     created_sequences = list()
+
+    #     gran_s = int(self.pulse_generator_constraints.waveform_length.step)
+    #     min_s  = int(self.pulse_generator_constraints.waveform_length.min)
+    #     sr     = self.sample_rate
+
+    #     def _bins(length_s):
+    #         return max(min_s, int(round(length_s * sr / gran_s)) * gran_s)
+
+    #     repump_bins  = _bins(repump_length)
+    #     waiting_bins = _bins(waiting_length)
+    #     decay_bins   = _bins(decay_length)
+
+    #     repump_s  = repump_bins  / sr
+    #     waiting_s = waiting_bins / sr
+    #     decay_s   = decay_bins   / sr
+
+    #     repump_reps = max(1, int(round(repump_total / repump_s)))
+    #     decay_reps  = max(1, int(round(record_length / decay_s)))
+
+    #     # --- Block 1: Green repump (a_ch2 DC + d_ch2 gate) ---
+    #     repump_element = self._get_green_laser_element(length=repump_s, increment=0,
+    #                                                    channels=['d_ch2'])
+    #     repump_block = PulseBlock(name='{0}_repump'.format(name))
+    #     repump_block.append(repump_element)
+    #     created_blocks.append(repump_block)
+    #     repump_ensemble = PulseBlockEnsemble(name='{0}_repump'.format(name), rotating_frame=False)
+    #     repump_ensemble.append((repump_block.name, 0))
+    #     created_ensembles.append(repump_ensemble)
+
+    #     # --- Block 2: Waiting (all idle — d_ch2 goes LOW after repump, MCS8A keeps recording) ---
+    #     waiting_element = self._get_idle_element(length=waiting_s, increment=0)
+    #     waiting_block = PulseBlock(name='{0}_waiting'.format(name))
+    #     waiting_block.append(waiting_element)
+    #     created_blocks.append(waiting_block)
+    #     waiting_ensemble = PulseBlockEnsemble(name='{0}_waiting'.format(name), rotating_frame=False)
+    #     waiting_ensemble.append((waiting_block.name, 0))
+    #     created_ensembles.append(waiting_ensemble)
+
+    #     # --- Block 3: Dual decay (a_ch2 DC + d_ch1 only — ungated, no d_ch2) ---
+    #     decay_element = self._get_green_laser_element(length=decay_s, increment=0,
+    #                                                   channels=['d_ch1'])
+    #     decay_block = PulseBlock(name='{0}_decay'.format(name))
+    #     decay_block.append(decay_element)
+    #     created_blocks.append(decay_block)
+    #     decay_ensemble = PulseBlockEnsemble(name='{0}_decay'.format(name), rotating_frame=False)
+    #     decay_ensemble.append((decay_block.name, 0))
+    #     created_ensembles.append(decay_ensemble)
+
+    #     # --- Block 4: End-of-cycle idle (all low — d_ch2 falling edge) ---
+    #     end_element = self._get_idle_element(length=waiting_s, increment=0)
+    #     end_block = PulseBlock(name='{0}_end'.format(name))
+    #     end_block.append(end_element)
+    #     created_blocks.append(end_block)
+    #     end_ensemble = PulseBlockEnsemble(name='{0}_end'.format(name), rotating_frame=False)
+    #     end_ensemble.append((end_block.name, 0))
+    #     created_ensembles.append(end_ensemble)
+
+    #     # --- Build PulseSequence ---
+    #     decay_sequence = PulseSequence(name=name, rotating_frame=False)
+
+    #     decay_sequence.append(repump_ensemble.name)
+    #     decay_sequence[-1].repetitions = repump_reps - 1
+
+    #     decay_sequence.append(waiting_ensemble.name)
+    #     decay_sequence[-1].repetitions = 0
+
+    #     decay_sequence.append(decay_ensemble.name)
+    #     decay_sequence[-1].repetitions = decay_reps - 1
+
+    #     decay_sequence.append(end_ensemble.name)
+    #     decay_sequence[-1].repetitions = 0
+    #     decay_sequence[-1].go_to = 1
+
+    #     decay_sequence.refresh_parameters()
+
+    #     total_counting_length = repump_reps * repump_s + waiting_s + decay_reps * decay_s
+    #     decay_sequence.measurement_information['alternating'] = False
+    #     decay_sequence.measurement_information['laser_ignore_list'] = list()
+    #     decay_sequence.measurement_information['controlled_variable'] = [0]
+    #     decay_sequence.measurement_information['units'] = ('', '')
+    #     decay_sequence.measurement_information['labels'] = ('Repetition', 'Signal')
+    #     decay_sequence.measurement_information['number_of_lasers'] = 1
+    #     decay_sequence.measurement_information['counting_length'] = total_counting_length
+
+    #     created_sequences.append(decay_sequence)
+    #     return created_blocks, created_ensembles, created_sequences
+
+    # def generate_charge_repump_sequence(self, name='charge_repump', killing_time=1.0e-2,
+    #                                     killing_block=1.0e-6, tau=1.0e-3,
+    #                                     tau_block=1.0e-6, readout_window=1.0e-6,
+    #                                     wait_length=1.0e-6):
+    #     """ Charge state killing + repeated (green repump + readout) units as a PulseSequence.
+
+    #     Operates in UNGATED mode: d_ch2 fires only in Block 1 (kill); its rising edge
+    #     triggers the MCS8A to start a time trace. Unit and end blocks have no d_ch2.
+
+    #     Each unit block contains TWO sequential elements played back-to-back:
+    #       [tau_block: a_ch2 green] + [readout_window: d_ch1 resonant]
+    #     This unit is repeated repump_reps = round(tau / tau_block) times.
+    #     The MCS8A time trace therefore contains repump_reps evenly spaced readout peaks.
+
+    #     Structure (loops continuously via go_to=1):
+    #       Block 1 — kill:  [d_ch1 + d_ch2 trigger] × killing_reps   (d_ch2 rising edge → MCS8A start)
+    #       Block 2 — unit:  [green(tau_block) + readout(readout_window)] × repump_reps
+    #       Block 3 — end:   [idle] × 1 → go_to=1
+
+    #     killing_reps = round(killing_time / killing_block)
+    #     repump_reps  = round(tau / tau_block)
+
+    #     @param str   name:           Name of the PulseSequence
+    #     @param float killing_time:   Total resonant kill duration [s]
+    #     @param float killing_block:  Single kill AWG block duration [s]; snapped to AWG bins
+    #     @param float tau:            Total green repump duration per cycle [s]
+    #     @param float tau_block:      Single green repump element duration [s]; snapped to AWG bins
+    #     @param float readout_window: Resonant readout element duration [s]; snapped to AWG bins
+    #     @param float wait_length:    End idle block duration [s]; snapped to AWG bins
+
+    #     @return: created_blocks, created_ensembles, created_sequences
+    #     """
+    #     created_blocks = list()
+    #     created_ensembles = list()
+    #     created_sequences = list()
+
+    #     gran_s = int(self.pulse_generator_constraints.waveform_length.step)
+    #     min_s  = int(self.pulse_generator_constraints.waveform_length.min)
+    #     sr     = self.sample_rate
+
+    #     def _bins(length_s):
+    #         return max(min_s, int(round(length_s * sr / gran_s)) * gran_s)
+
+    #     kill_s    = _bins(killing_block) / sr
+    #     tau_s     = _bins(tau_block)     / sr
+    #     readout_s = _bins(readout_window) / sr
+    #     wait_s    = _bins(wait_length)   / sr
+
+    #     kill_reps   = max(1, int(round(killing_time / kill_s)))
+    #     repump_reps = max(1, int(round(tau / tau_s)))
+
+    #     # --- Block 1: Kill (d_ch1 resonant + d_ch2 trigger → MCS8A start) ---
+    #     kill_element = self._get_trigger_element(length=kill_s, increment=0,
+    #                                              channels=['d_ch1', 'd_ch2'])
+    #     kill_block = PulseBlock(name='{0}_kill'.format(name))
+    #     kill_block.append(kill_element)
+    #     created_blocks.append(kill_block)
+    #     kill_ensemble = PulseBlockEnsemble(name='{0}_kill'.format(name), rotating_frame=False)
+    #     kill_ensemble.append((kill_block.name, 0))
+    #     created_ensembles.append(kill_ensemble)
+
+    #     # --- Block 2: Unit = [green tau_block] + [resonant readout] played sequentially ---
+    #     # Both elements are in a single PulseBlock so they play back-to-back on each repetition.
+    #     green_element   = self._get_green_laser_element(length=tau_s, increment=0)
+    #     readout_element = self._get_trigger_element(length=readout_s, increment=0,
+    #                                                 channels=['d_ch1'])
+    #     unit_block = PulseBlock(name='{0}_unit'.format(name))
+    #     unit_block.append(green_element)
+    #     unit_block.append(readout_element)
+    #     created_blocks.append(unit_block)
+    #     unit_ensemble = PulseBlockEnsemble(name='{0}_unit'.format(name), rotating_frame=False)
+    #     unit_ensemble.append((unit_block.name, 0))
+    #     created_ensembles.append(unit_ensemble)
+
+    #     # --- Block 3: End idle ---
+    #     end_element = self._get_idle_element(length=wait_s, increment=0)
+    #     end_block = PulseBlock(name='{0}_end'.format(name))
+    #     end_block.append(end_element)
+    #     created_blocks.append(end_block)
+    #     end_ensemble = PulseBlockEnsemble(name='{0}_end'.format(name), rotating_frame=False)
+    #     end_ensemble.append((end_block.name, 0))
+    #     created_ensembles.append(end_ensemble)
+
+    #     # --- Build PulseSequence ---
+    #     charge_sequence = PulseSequence(name=name, rotating_frame=False)
+
+    #     charge_sequence.append(kill_ensemble.name)
+    #     charge_sequence[-1].repetitions = kill_reps - 1
+
+    #     charge_sequence.append(unit_ensemble.name)
+    #     charge_sequence[-1].repetitions = repump_reps - 1
+
+    #     charge_sequence.append(end_ensemble.name)
+    #     charge_sequence[-1].repetitions = 0
+    #     charge_sequence[-1].go_to = 1
+
+    #     charge_sequence.refresh_parameters()
+
+    #     total_counting_length = kill_reps * kill_s + repump_reps * (tau_s + readout_s) + wait_s
+    #     charge_sequence.measurement_information['alternating'] = False
+    #     charge_sequence.measurement_information['laser_ignore_list'] = list()
+    #     charge_sequence.measurement_information['controlled_variable'] = [0]
+    #     charge_sequence.measurement_information['units'] = ('', '')
+    #     charge_sequence.measurement_information['labels'] = ('Repetition', 'Signal')
+    #     charge_sequence.measurement_information['number_of_lasers'] = 1
+    #     charge_sequence.measurement_information['counting_length'] = total_counting_length
+
+    #     created_sequences.append(charge_sequence)
+    #     return created_blocks, created_ensembles, created_sequences
+
+    # def generate_extra_repump_sequence(self, name='extra_repump', repump_total=1.0e-3,
+    #                                    repump_length=1.0e-6, killing_time=1.0e-2,
+    #                                    killing_block=1.0e-6, tau=1.0e-3,
+    #                                    tau_block=1.0e-6, readout_window=1.0e-6,
+    #                                    wait_length=1.0e-6):
+    #     """ Green repump → kill → repeated (extra-repump + readout) units.
+
+    #     Operates in UNGATED mode: d_ch2 fires only during Block 1 (green repump); its rising
+    #     edge triggers the MCS8A to start a time trace. Kill and unit blocks have no d_ch2.
+
+    #     Block 1 — green repump:  a_ch2 DC + d_ch2 trigger,     × repump_reps
+    #     Block 2 — kill:          d_ch1 only (resonant),         × kill_reps
+    #     Block 3 — unit:          [a_ch1 DC (extra repump, tau_block) +
+    #                               d_ch1 (readout, readout_window)] × unit_reps
+    #     Block 4 — end:           idle × 1  → go_to=1
+
+    #     The extra repump element drives a_ch1 as DC at green_laser_voltage.
+
+    #     repump_reps = round(repump_total  / repump_s)
+    #     kill_reps   = round(killing_time  / kill_s)
+    #     unit_reps   = round(tau           / tau_s)
+
+    #     @param str   name:           Name of the PulseSequence
+    #     @param float repump_total:   Total green repump duration per cycle [s]
+    #     @param float repump_length:  Single green repump AWG block duration [s]; snapped to AWG bins
+    #     @param float killing_time:   Total resonant kill duration [s]
+    #     @param float killing_block:  Single kill AWG block duration [s]; snapped to AWG bins
+    #     @param float tau:            Total extra-repump duration per cycle [s]
+    #     @param float tau_block:      Single extra-repump element duration [s]; snapped to AWG bins
+    #     @param float readout_window: Readout element duration [s]; snapped to AWG bins
+    #     @param float wait_length:    End idle block duration [s]; snapped to AWG bins
+
+    #     @return: created_blocks, created_ensembles, created_sequences
+    #     """
+    #     created_blocks = list()
+    #     created_ensembles = list()
+    #     created_sequences = list()
+
+    #     gran_s = int(self.pulse_generator_constraints.waveform_length.step)
+    #     min_s  = int(self.pulse_generator_constraints.waveform_length.min)
+    #     sr     = self.sample_rate
+
+    #     def _bins(length_s):
+    #         return max(min_s, int(round(length_s * sr / gran_s)) * gran_s)
+
+    #     repump_s  = _bins(repump_length)  / sr
+    #     kill_s    = _bins(killing_block)  / sr
+    #     tau_s     = _bins(tau_block)      / sr
+    #     readout_s = _bins(readout_window) / sr
+    #     wait_s    = _bins(wait_length)    / sr
+
+    #     repump_reps = max(1, int(round(repump_total   / repump_s)))
+    #     kill_reps   = max(1, int(round(killing_time   / kill_s)))
+    #     unit_reps   = max(1, int(round(tau            / tau_s)))
+
+    #     # --- Block 1: Green repump (a_ch2 DC + d_ch2 trigger → MCS8A start) ---
+    #     repump_element = self._get_green_laser_element(length=repump_s, increment=0,
+    #                                                    channels=['d_ch2'])
+    #     repump_block = PulseBlock(name='{0}_repump'.format(name))
+    #     repump_block.append(repump_element)
+    #     created_blocks.append(repump_block)
+    #     repump_ensemble = PulseBlockEnsemble(name='{0}_repump'.format(name), rotating_frame=False)
+    #     repump_ensemble.append((repump_block.name, 0))
+    #     created_ensembles.append(repump_ensemble)
+
+    #     # --- Block 2: Kill (d_ch1 resonant only, no d_ch2) ---
+    #     kill_element = self._get_trigger_element(length=kill_s, increment=0,
+    #                                              channels=['d_ch1'])
+    #     kill_block = PulseBlock(name='{0}_kill'.format(name))
+    #     kill_block.append(kill_element)
+    #     created_blocks.append(kill_block)
+    #     kill_ensemble = PulseBlockEnsemble(name='{0}_kill'.format(name), rotating_frame=False)
+    #     kill_ensemble.append((kill_block.name, 0))
+    #     created_ensembles.append(kill_ensemble)
+
+    #     # --- Block 3: Unit = [a_ch1 extra repump (tau_block)] + [d_ch1 readout] ---
+    #     extra_repump_element = self._get_extra_repump_element(length=tau_s, increment=0)
+    #     readout_element      = self._get_trigger_element(length=readout_s, increment=0,
+    #                                                      channels=['d_ch1'])
+    #     unit_block = PulseBlock(name='{0}_unit'.format(name))
+    #     unit_block.append(extra_repump_element)
+    #     unit_block.append(readout_element)
+    #     created_blocks.append(unit_block)
+    #     unit_ensemble = PulseBlockEnsemble(name='{0}_unit'.format(name), rotating_frame=False)
+    #     unit_ensemble.append((unit_block.name, 0))
+    #     created_ensembles.append(unit_ensemble)
+
+    #     # --- Block 4: End idle ---
+    #     end_element = self._get_idle_element(length=wait_s, increment=0)
+    #     end_block = PulseBlock(name='{0}_end'.format(name))
+    #     end_block.append(end_element)
+    #     created_blocks.append(end_block)
+    #     end_ensemble = PulseBlockEnsemble(name='{0}_end'.format(name), rotating_frame=False)
+    #     end_ensemble.append((end_block.name, 0))
+    #     created_ensembles.append(end_ensemble)
+
+    #     # --- Build PulseSequence ---
+    #     extra_sequence = PulseSequence(name=name, rotating_frame=False)
+
+    #     extra_sequence.append(repump_ensemble.name)
+    #     extra_sequence[-1].repetitions = repump_reps - 1
+
+    #     extra_sequence.append(kill_ensemble.name)
+    #     extra_sequence[-1].repetitions = kill_reps - 1
+
+    #     extra_sequence.append(unit_ensemble.name)
+    #     extra_sequence[-1].repetitions = unit_reps - 1
+
+    #     extra_sequence.append(end_ensemble.name)
+    #     extra_sequence[-1].repetitions = 0
+    #     extra_sequence[-1].go_to = 1
+
+    #     extra_sequence.refresh_parameters()
+
+    #     total_counting_length = (repump_reps * repump_s + kill_reps * kill_s
+    #                              + unit_reps * (tau_s + readout_s) + wait_s)
+    #     extra_sequence.measurement_information['alternating'] = False
+    #     extra_sequence.measurement_information['laser_ignore_list'] = list()
+    #     extra_sequence.measurement_information['controlled_variable'] = [0]
+    #     extra_sequence.measurement_information['units'] = ('', '')
+    #     extra_sequence.measurement_information['labels'] = ('Repetition', 'Signal')
+    #     extra_sequence.measurement_information['number_of_lasers'] = 1
+    #     extra_sequence.measurement_information['counting_length'] = total_counting_length
+
+    #     created_sequences.append(extra_sequence)
+    #     return created_blocks, created_ensembles, created_sequences
+
+    # def generate_green_laser_on(self, name='green_on', length=3.0e-6):
+    #     """ Generates green laser on by driving a_ch2 as DC high.
+
+    #     @param str name: Name of the PulseBlockEnsemble
+    #     @param float length: green laser duration in seconds
+
+    #     @return object: the generated PulseBlockEnsemble object.
+    #     """
+    #     created_blocks = list()
+    #     created_ensembles = list()
+    #     created_sequences = list()
+
+    #     # create the green laser element (a_ch2 driven as DC at green_laser_voltage, all others idle/low)
+    #     green_laser_element = self._get_green_laser_element(length=length, increment=0)
+    #     # Create block and append to created_blocks list
+    #     green_laser_block = PulseBlock(name=name)
+    #     green_laser_block.append(green_laser_element)
+    #     created_blocks.append(green_laser_block)
+    #     # Create block ensemble and append to created_ensembles list
+    #     block_ensemble = PulseBlockEnsemble(name=name, rotating_frame=False)
+    #     block_ensemble.append((green_laser_block.name, 0))
+    #     created_ensembles.append(block_ensemble)
+    #     return created_blocks, created_ensembles, created_sequences
+    
+    # def generate_resonant_laser_on(self, name='resonant_on', length=3.0e-6):
+    #     """ Generates resonant laser on by driving d_ch1 digital high.
+
+    #     @param str name: Name of the PulseBlockEnsemble
+    #     @param float length: resonant laser duration in seconds
+
+    #     @return object: the generated PulseBlockEnsemble object.
+    #     """
+    #     created_blocks = list()
+    #     created_ensembles = list()
+    #     created_sequences = list()
+
+    #     # create the resonant laser element (d_ch1 digital high, all others idle/low)
+    #     resonant_laser_element = self._get_trigger_element(length=length, increment=0, channels='d_ch1')
+    #     # Create block and append to created_blocks list
+    #     resonant_laser_block = PulseBlock(name=name)
+    #     resonant_laser_block.append(resonant_laser_element)
+    #     created_blocks.append(resonant_laser_block)
+    #     # Create block ensemble and append to created_ensembles list
+    #     block_ensemble = PulseBlockEnsemble(name=name, rotating_frame=False)
+    #     block_ensemble.append((resonant_laser_block.name, 0))
+    #     created_ensembles.append(block_ensemble)
+    #     return created_blocks, created_ensembles, created_sequences    
+    
+    # def generate_all_laser_on(self, name='all_laser_on', length=3.0e-6):
+    #     """ Generates both green (a_ch2 DC) and resonant (d_ch1 digital high) lasers on simultaneously.
+
+    #     @param str name: Name of the PulseBlockEnsemble
+    #     @param float length: duration in seconds
+
+    #     @return object: the generated PulseBlockEnsemble object.
+    #     """
+    #     created_blocks = list()
+    #     created_ensembles = list()
+    #     created_sequences = list()
+
+    #     # a_ch2 DC at green_laser_voltage + d_ch1 digital high simultaneously
+    #     all_laser_element = self._get_green_laser_element(length=length, increment=0, channels='d_ch1')
+    #     # Create block and append to created_blocks list
+    #     all_laser_block = PulseBlock(name=name)
+    #     all_laser_block.append(all_laser_element)
+    #     created_blocks.append(all_laser_block)
+    #     # Create block ensemble and append to created_ensembles list
+    #     block_ensemble = PulseBlockEnsemble(name=name, rotating_frame=False)
+    #     block_ensemble.append((all_laser_block.name, 0))
+    #     created_ensembles.append(block_ensemble)
+    #     return created_blocks, created_ensembles, created_sequences

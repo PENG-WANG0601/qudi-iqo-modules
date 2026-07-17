@@ -152,10 +152,23 @@ class BasicPulseAnalyzer(PulseAnalyzerBase):
 
         # loop over all laser pulses and analyze them
         for ii, laser_arr in enumerate(laser_data):
+            # Ensure valid signal window
+            if signal_start_bin >= signal_end_bin or signal_start_bin < 0:
+                signal_data[ii] = 0.0
+                error_data[ii] = 0.0
+                continue
+            
             # calculate the mean of the data in the signal window
-            signal = laser_arr[signal_start_bin:signal_end_bin].mean()
-            signal_sum = laser_arr[signal_start_bin:signal_end_bin].sum()
-            signal_error = np.sqrt(signal_sum) / (signal_end_bin - signal_start_bin)
+            signal_slice = laser_arr[signal_start_bin:signal_end_bin]
+            if len(signal_slice) == 0:
+                signal_data[ii] = 0.0
+                error_data[ii] = 0.0
+                continue
+                
+            signal = signal_slice.mean()
+            signal_sum = signal_slice.sum()
+            bin_width = signal_end_bin - signal_start_bin
+            signal_error = np.sqrt(max(signal_sum, 0)) / bin_width if bin_width > 0 else 0.0
 
             # Avoid numpy C type variables overflow and NaN values
             if signal < 0 or signal != signal:
@@ -232,7 +245,10 @@ class BasicPulseAnalyzer(PulseAnalyzerBase):
 
             signal_data[ii] = signal_mean - reference_mean
 
-            # calculate with respect to gaussian error 'evolution'
-            error_data[ii] = signal_data[ii] * np.sqrt(1 / abs(signal_sum) + 1 / abs(reference_sum))
+            # calculate with respect to gaussian error 'evolution' while avoiding division by zero
+            if abs(signal_sum) > 0 and abs(reference_sum) > 0:
+                error_data[ii] = signal_data[ii] * np.sqrt(1 / abs(signal_sum) + 1 / abs(reference_sum))
+            else:
+                error_data[ii] = 0.0
 
         return signal_data, error_data

@@ -1,0 +1,126 @@
+# FastComtec MCS6A vs MCS8A Differences and Qudi Modifications
+
+## Hardware Differences
+
+### FastComtec MCS6A
+- **Channels**: 6 input channels
+- **Model**: MCS6A
+- **DLL**: DMCS6.dll
+- **Typical Applications**: 6-channel time-resolved counting
+
+### FastComtec MCS8A
+- **Channels**: 8 input channels
+- **Model**: MCS8A
+- **DLL**: DMCS8.dll
+- **Typical Applications**: 8-channel time-resolved counting
+
+### Key Differences
+1. **Number of Channels**: 6 vs 8
+2. **DLL Library**: Different driver libraries
+3. **Hardware Constraints**: May have different timing or memory constraints
+4. **Channel Configuration**: Different channel mapping possibilities
+
+## Qudi Implementation Changes
+
+### Files Created/Modified
+
+#### 1. New File: `fastcomtecmcs8a.py`
+**Location**: `src/qudi/hardware/fastcomtec/fastcomtecmcs8a.py`
+
+**Changes Made**:
+- **Header Documentation**: Updated to reference MCS8A
+- **Class Name**: Changed from `FastComtec` to `FastComtecMCS8A`
+- **DLL Loading**: Changed from `DMCS6.dll` to `DMCS8.dll`
+- **Config Example**: Updated module path and name
+
+#### 2. Modified File: `fastcomtecmcs6.py`
+**Changes Made**:
+- **Header Documentation**: Updated to reference MCS8A (for demonstration)
+- **Class Documentation**: Updated to MCS8A
+- **DLL Loading**: Changed to `DMCS8.dll` (for demonstration)
+
+### Configuration Changes
+
+#### For MCS8A Usage:
+```yaml
+# In your qudi config file
+hardware:
+    fastcomtec_mcs8a:
+        module.Class: 'fastcomtec.fastcomtecmcs8a.FastComtecMCS8A'
+        options:
+            gated: False
+            trigger_safety: 400e-9
+            aom_delay: 390e-9
+            minimal_binwidth: 0.2e-9
+```
+
+### Code Structure
+The MCS8A implementation maintains the same interface and functionality as MCS6A, with these key differences:
+
+1. **DLL Reference**: Points to DMCS8.dll instead of DMCS6.dll
+2. **Class Naming**: Uses FastComtecMCS8A for clarity
+3. **Documentation**: Updated to reflect MCS8A specifications
+
+### Potential Additional Considerations
+
+#### Hardware-Specific Constraints
+The MCS8A might have different:
+- Maximum sweep lengths
+- Timing resolutions
+- Memory constraints
+- Channel-specific settings
+
+#### DLL Compatibility
+- Ensure DMCS8.dll is installed in `C:\Windows\System32\`
+- Verify DLL version compatibility with your MCS8A hardware
+- Check for any MCS8A-specific API changes
+
+#### Testing Requirements
+- Verify all 8 channels function correctly
+- Test timing accuracy and resolution
+- Validate gated vs ungated modes
+- Check data acquisition reliability
+
+## Migration Steps
+
+### From MCS6A to MCS8A
+
+1. **Install MCS8A Hardware**: Ensure proper hardware installation
+2. **Install DLL**: Place DMCS8.dll in system path
+3. **Update Config**: Change module class to `fastcomtec.fastcomtecmcs8a.FastComtecMCS8A`
+4. **Test Channels**: Verify all 8 channels work as expected
+5. **Validate Timing**: Ensure timing parameters meet requirements
+
+### Backward Compatibility
+- MCS6A configurations remain unchanged
+- Existing MCS6A setups continue to work
+- MCS8A provides additional channels but same core functionality
+
+## Troubleshooting
+
+### Common Issues
+1. **DLL Not Found**: Ensure DMCS8.dll is in system path
+2. **Channel Count Mismatch**: Verify hardware has 8 functional channels
+3. **Timing Issues**: Check MCS8A-specific timing constraints
+4. **API Changes**: Verify DLL version compatibility
+
+### Verification Steps
+1. Check DLL loading: `ctypes.windll.LoadLibrary('C:\Windows\System32\DMCS8.dll')`
+2. Test basic functionality with known working parameters
+3. Validate channel count and mapping
+4. Compare performance with MCS6A baseline
+
+## Future Enhancements
+
+### Potential Improvements
+1. **Dynamic Channel Detection**: Auto-detect available channels
+2. **Model-Specific Constraints**: Load constraints based on detected hardware
+3. **Unified Driver**: Single driver supporting both MCS6A and MCS8A
+4. **Enhanced Diagnostics**: Better error reporting and hardware validation
+
+### Configuration Options
+Consider adding:
+- `model`: Auto-detect or manually specify MCS6A/MCS8A
+- `channel_count`: Override auto-detection
+- `dll_path`: Custom DLL location
+- `hardware_validation`: Enable/disable hardware checks

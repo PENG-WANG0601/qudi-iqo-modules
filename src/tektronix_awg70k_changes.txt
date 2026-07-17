@@ -1,0 +1,151 @@
+# Changes Made to tektronix_awg70k.py
+# Date: January 7, 2026
+# Purpose: Fix AWG70K activation issues in Qudi
+
+## Summary
+The AWG70K module was failing to activate due to multiple interconnected issues related to VISA address format, connection logic, and error handling. The changes make the module more robust and compatible with modern VISA implementations.
+
+## Root Cause Analysis
+The primary issue was a mismatch between the expected VISA address format and what PyVISA actually returns. Combined with over-reliance on `list_resources()` and poor error handling, this caused cascading failures.
+
+## Detailed Changes
+
+### 1. Updated Example Configuration in Docstring
+**Location**: Lines 44-50 (class docstring)
+**Change**: 
+- Before: `awg_visa_address: 'TCPIP::10.42.0.211::INSTR'`
+- After: `awg_visa_address: 'TCPIP0::10.42.0.211::inst0::INSTR'`
+
+**Reason**: The example config used an outdated VISA address format. Modern NI-VISA implementations use `TCPIP0::` for LAN connections and require the `::inst0::INSTR` suffix for proper instrument identification.
+
+### 2. Fixed VISA Connection Logic
+**Location**: Lines 95-108 (on_activate method)
+**Change**: Replaced the `list_resources()` check with direct `open_resource()` attempt wrapped in try/except.
+
+**Before**:
+```python
+if self._visa_address not in self._rm.list_resources():
+    self.awg = None
+    self.log.error('VISA address "{0}" not found...')
+else:
+    self.awg = self._rm.open_resource(self._visa_address)
+```
+
+**After**:
+```python
+try:
+    self.awg = self._rm.open_resource(self._visa_address)
+    self.awg.timeout = self._visa_timeout * 1000
+except:
+    self.awg = None
+    self.log.error('VISA address "{0}" not found...')
+```
+
+**Reason**: The `list_resources()` method can be unreliable and may not find devices that can actually be opened. This approach matches the more successful AWG7k module and handles connection failures more gracefully.
+
+### 3. Protected FTP Connection
+**Location**: Lines 110-113 (on_activate method)
+**Change**: Added condition to only attempt FTP connection when VISA connection succeeds.
+
+**Before**:
+```python
+with FTP(self._ip_address) as ftp:
+    ftp.login(user=self._username, passwd=self._password)
+    ftp.cwd(self.ftp_working_dir)
+```
+
+**After**:
+```python
+if self.awg is not None:
+    with FTP(self._ip_address) as ftp:
+        ftp.login(user=self._username, passwd=self._password)
+        ftp.cwd(self.ftp_working_dir)
+```
+
+**Reason**: Attempting FTP connection when VISA fails causes unnecessary exceptions and delays. FTP is only needed when the AWG is successfully connected via VISA.
+
+### 4. Protected Device Constraint Queries
+**Location**: Lines 120-135 (on_activate method)
+**Change**: Added condition to only query device constraints when `self.awg` is not None, with fallback defaults.
+
+**Before**:
+```python
+self.__max_seq_steps = int(self.query('SLIS:SEQ:STEP:MAX?'))
+# ... more queries
+```
+
+**After**:
+```python
+if self.awg is not None:
+    self.__max_seq_steps = int(self.query('SLIS:SEQ:STEP:MAX?'))
+    # ... more queries
+else:
+    self.__max_seq_steps = 0
+    # ... set defaults
+```
+
+**Reason**: Querying device constraints when `self.awg` is None causes AttributeError. This ensures graceful degradation when hardware is unavailable.
+
+### 5. Protected query() Method
+**Location**: Lines 1252-1258 (query method)
+**Change**: Added check for `self.awg` being None.
+
+**Before**:
+```python
+return self.awg.query(question).strip().rstrip('\n').rstrip().strip('"')
+```
+
+**After**:
+```python
+if self.awg is None:
+    raise RuntimeError('AWG not connected')
+return self.awg.query(question).strip().rstrip('\n').rstrip().strip('"')
+```
+
+**Reason**: Prevents AttributeError when methods are called on a disconnected AWG. Provides clear error message instead of cryptic exceptions.
+
+### 6. Protected write() Method
+**Location**: Lines 1263-1270 (write method)
+**Change**: Added check for `self.awg` being None, return error code instead of crashing.
+
+**Before**:
+```python
+bytes_written = self.awg.write(command)
+return 0
+```
+
+**After**:
+```python
+if self.awg is None:
+    return -1
+bytes_written = self.awg.write(command)
+return 0
+```
+
+**Reason**: Prevents AttributeError and provides proper error handling for write operations on disconnected hardware.
+
+## Additional Configuration Change
+**File**: 2Foci_config_NVision.cfg
+**Change**: Updated VISA address from `'TCPIP::192.168.101.4::inst0::INSTR'` to `'TCPIP0::192.168.101.4::inst0::INSTR'`
+
+**Reason**: The config file used the incorrect VISA address format that doesn't match what PyVISA expects.
+
+## Impact
+- AWG70K now activates successfully in Qudi
+- Module handles both connected and disconnected states gracefully
+- Improved compatibility with modern VISA implementations
+- Better error messages and debugging information
+- No breaking changes to existing functionality
+
+## Testing
+The changes were validated by:
+1. Confirming VISA resources are found with correct address format
+2. Testing VISA connection establishment
+3. Testing FTP connection to AWG
+4. Verifying device identification queries work
+5. Ensuring proper error handling when device is unavailable
+
+## Future Considerations
+- Consider updating other AWG modules to use similar robust connection logic
+- May want to add retry mechanisms for transient connection failures
+- Could add more detailed logging for troubleshooting VISA issues

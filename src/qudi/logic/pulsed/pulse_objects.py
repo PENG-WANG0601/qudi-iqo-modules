@@ -1093,6 +1093,10 @@ class PredefinedGeneratorBase:
         return self.generation_parameters.get('analog_trigger_voltage')
 
     @property
+    def green_laser_voltage(self):
+        return self.generation_parameters.get('green_laser_voltage', 0.4)
+
+    @property
     def laser_delay(self):
         return self.generation_parameters.get('laser_delay')
 
@@ -1215,6 +1219,59 @@ class PredefinedGeneratorBase:
                 pulse_function[channel] = SamplingFunctions.DC(voltage=self.analog_trigger_voltage)
 
         # return trigger element
+        return PulseBlockElement(init_length_s=length,
+                                 increment_s=increment,
+                                 pulse_function=pulse_function,
+                                 digital_high=digital_high)
+
+    def _get_green_laser_element(self, length, increment, channels=None):
+        """
+        Creates a PulseBlockElement with a_ch2 driven as DC at green_laser_voltage.
+        Any additional digital channels in `channels` are set high.
+
+        @param float length: element duration in seconds
+        @param float increment: element duration increment in seconds
+        @param str|list|None channels: extra channel(s) to set high alongside a_ch2
+
+        @return: PulseBlockElement
+        """
+        if channels is None:
+            channels = []
+        if isinstance(channels, str):
+            channels = [channels]
+
+        pulse_function = {chnl: SamplingFunctions.Idle() for chnl in self.analog_channels}
+        digital_high = {chnl: False for chnl in self.digital_channels}
+
+        # Always drive a_ch2 as DC at green_laser_voltage
+        pulse_function['a_ch2'] = SamplingFunctions.DC(voltage=self.green_laser_voltage)
+
+        # Set any additional digital channels high
+        for channel in channels:
+            if channel.startswith('d'):
+                digital_high[channel] = True
+
+        return PulseBlockElement(init_length_s=length,
+                                 increment_s=increment,
+                                 pulse_function=pulse_function,
+                                 digital_high=digital_high)
+
+    def _get_extra_repump_element(self, length, increment):
+        """
+        Creates a PulseBlockElement with a_ch1 driven as DC at green_laser_voltage.
+        Used for an extra repump step on a separate channel (a_ch1) at the same
+        voltage level as the green laser (a_ch2). All digital channels remain low.
+
+        @param float length: element duration in seconds
+        @param float increment: element duration increment in seconds
+
+        @return: PulseBlockElement
+        """
+        pulse_function = {chnl: SamplingFunctions.Idle() for chnl in self.analog_channels}
+        digital_high = {chnl: False for chnl in self.digital_channels}
+
+        pulse_function['a_ch1'] = SamplingFunctions.DC(voltage=self.green_laser_voltage)
+
         return PulseBlockElement(init_length_s=length,
                                  increment_s=increment,
                                  pulse_function=pulse_function,
