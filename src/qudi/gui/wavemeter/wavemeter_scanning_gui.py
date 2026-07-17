@@ -54,55 +54,55 @@ class WavemeterHistogramMainWindow(QtWidgets.QMainWindow):
         icon_path = os.path.join(get_artwork_dir(), 'icons')
 
         icon = QtGui.QIcon(os.path.join(icon_path, 'application-exit'))
-        self.action_close = QtWidgets.QAction('Close')
+        self.action_close = QtGui.QAction('Close')
         self.action_close.setIcon(icon)
 
         icon = QtGui.QIcon(os.path.join(icon_path, 'document-save'))
-        self.action_save = QtWidgets.QAction('Save')
+        self.action_save = QtGui.QAction('Save')
         self.action_save.setToolTip('Save all data')
         self.action_save.setIcon(icon)
 
         icon = QtGui.QIcon(os.path.join(icon_path, 'configure'))
-        self.action_show_fit_configuration = QtWidgets.QAction('Fit Configuration')
+        self.action_show_fit_configuration = QtGui.QAction('Fit Configuration')
         self.action_show_fit_configuration.setToolTip(
             'Open a dialog to edit data fitting configurations.')
         self.action_show_fit_configuration.setIcon(icon)
 
         icon = QtGui.QIcon(os.path.join(icon_path, 'record-counter'))
-        self.start_trace_Action2 = QtWidgets.QAction('Start Wavemeter')
+        self.start_trace_Action2 = QtGui.QAction('Start Wavemeter')
         self.start_trace_Action2.setCheckable(True)
         self.start_trace_Action2.setToolTip('Start/stop wavemeter to display wavelength')
         self.start_trace_Action2.setIcon(icon)
 
         icon = QtGui.QIcon(os.path.join(icon_path, 'start-counter'))
-        self.start_trace_Action = QtWidgets.QAction('Start trace')
+        self.start_trace_Action = QtGui.QAction('Start trace')
         self.start_trace_Action.setCheckable(True)
         self.start_trace_Action.setToolTip('Start/pause wavemeter for data acquisition with counts')
         self.start_trace_Action.setIcon(icon)
 
         icon = QtGui.QIcon(os.path.join(icon_path, 'edit-clear'))
-        self.actionClear_trace_data = QtWidgets.QAction('Clear trace data')
+        self.actionClear_trace_data = QtGui.QAction('Clear trace data')
         self.actionClear_trace_data.setIcon(icon)
 
-        self.actionToggle_x_axis = QtWidgets.QAction('Change to frequency')
+        self.actionToggle_x_axis = QtGui.QAction('Change to frequency')
         self.actionToggle_x_axis.setCheckable(True)
 
-        self.action_autoscale_hist = QtWidgets.QAction('Autoscale histogram')
+        self.action_autoscale_hist = QtGui.QAction('Autoscale histogram')
         self.action_autoscale_hist.setToolTip('Automatically set boundaries of histogram with min/max x value')
 
-        self.show_hist_region = QtWidgets.QAction('Show histogram region')
+        self.show_hist_region = QtGui.QAction('Show histogram region')
         self.show_hist_region.setCheckable(True)
 
-        self.action_fit_envelope_histogram = QtWidgets.QAction('Fit envelope')
+        self.action_fit_envelope_histogram = QtGui.QAction('Fit envelope')
         self.action_fit_envelope_histogram.setCheckable(True)
         self.action_fit_envelope_histogram.setToolTip(
             'Either fit the mean histogram or envelope histogram. Default is mean histogram. ')
 
-        self.show_all_data_action = QtWidgets.QAction('Show all data')
+        self.show_all_data_action = QtGui.QAction('Show all data')
         self.show_all_data_action.setToolTip(
             'Show all data since due to Gui performace during acquisition only most recent *1000* points are displayed.')
 
-        self.restore_default_view_action = QtWidgets.QAction('Restore default')
+        self.restore_default_view_action = QtGui.QAction('Restore default')
 
         self.save_tag_LineEdit = QtWidgets.QLineEdit()
         self.save_tag_LineEdit.setMaximumWidth(400)
