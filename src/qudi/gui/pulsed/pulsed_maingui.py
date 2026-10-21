@@ -2928,7 +2928,19 @@ class PulsedMeasurementGui(GuiBase):
                                             pen={'color': palette.c4, 'width': 1},
                                             movable=True)
         self.lasertrace_image = pg.PlotDataItem(np.arange(10), np.zeros(10), pen=palette.c1)
+        # Ungated traces (and 'Display raw') can be hundreds of thousands of points long.
+        # Rendering every point on every update tick is what stalls the UI -- peak-preserving
+        # downsampling draws roughly one point per screen pixel instead, keeping real spikes
+        # visible without the per-tick cost scaling with the record length.
+        self.lasertrace_image.setDownsampling(auto=True, method='peak')
+        # setClipToView must come AFTER addItem: pyqtgraph's ViewBox.addItem() adds the item to
+        # the scene before reparenting it into the ViewBox, which fires an itemChange redraw
+        # while the item is still parentless. With clipToView already True at that point,
+        # PlotDataItem._getDisplayDataset() falls back to the raw PlotWidget (no
+        # autoRangeEnabled()) instead of the ViewBox and raises AttributeError, aborting GUI
+        # activation. Enabling clipToView only once the item is fully parented avoids this.
         self._pe.laserpulses_PlotWidget.addItem(self.lasertrace_image)
+        self.lasertrace_image.setClipToView(True)
         self._pe.laserpulses_PlotWidget.addItem(self.sig_start_line)
         self._pe.laserpulses_PlotWidget.addItem(self.sig_end_line)
         self._pe.laserpulses_PlotWidget.addItem(self.ref_start_line)

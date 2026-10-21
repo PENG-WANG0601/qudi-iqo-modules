@@ -829,10 +829,13 @@ class SequenceGeneratorLogic(LogicBase):
             try:
                 with open(filepath, 'rb') as file:
                     block = pickle.load(file)
-            except pickle.UnpicklingError:
-                self.log.error('Failed to de-serialize PulseBlock "{0}" from file.'.format(block_name))
+            except (pickle.UnpicklingError, EOFError):
+                # EOFError also covers empty/truncated files, e.g. left behind by a previous
+                # failed save (pickle.dump truncates the file on open before it can fail).
+                self.log.error('Failed to de-serialize PulseBlock "{0}" from file. Deleting broken '
+                               'file.'.format(block_name))
                 os.remove(filepath)
-            except ModuleNotFoundError:
+            except (ModuleNotFoundError, AttributeError):
                 self.log.error(
                     'Failed to de-serialize PulseBlock "{0}" from file because of missing dependencies.\n'
                     'For better debugging I dumped the traceback to debug.'.format(block_name)
@@ -939,13 +942,23 @@ class SequenceGeneratorLogic(LogicBase):
             try:
                 with open(filepath, 'rb') as file:
                     ensemble = pickle.load(file)
-            except pickle.UnpicklingError:
+            except (pickle.UnpicklingError, EOFError):
+                # EOFError also covers empty/truncated files, e.g. left behind by a previous
+                # failed save (pickle.dump truncates the file on open before it can fail).
                 self.log.error(
                     'Failed to de-serialize PulseBlockEnsemble "{0}" from file. Deleting broken file.'.format(
                         ensemble_name
                     )
                 )
                 os.remove(filepath)
+            except (ModuleNotFoundError, AttributeError):
+                self.log.error(
+                    'Failed to de-serialize PulseBlockEnsemble "{0}" from file because of missing '
+                    'dependencies.\nFor better debugging I dumped the traceback to debug.'.format(
+                        ensemble_name
+                    )
+                )
+                self.log.debug('{0!s}'.format(traceback.format_exc()))
         return ensemble
 
     def _update_ensembles_from_file(self):
@@ -1061,9 +1074,21 @@ class SequenceGeneratorLogic(LogicBase):
                 # Restored it here but a better way needs to be found.
                 for step in range(len(sequence)):
                     sequence[step].__dict__ = sequence[step]
-            except pickle.UnpicklingError:
-                self.log.error('Failed to de-serialize PulseSequence "{0}" from file.'.format(sequence_name))
+            except (pickle.UnpicklingError, EOFError):
+                # EOFError also covers empty/truncated files, e.g. left behind by a previous
+                # failed save (pickle.dump truncates the file on open before it can fail).
+                self.log.error('Failed to de-serialize PulseSequence "{0}" from file. Deleting broken '
+                               'file.'.format(sequence_name))
                 os.remove(filepath)
+                return None
+            except (ModuleNotFoundError, AttributeError):
+                self.log.error(
+                    'Failed to de-serialize PulseSequence "{0}" from file because of missing '
+                    'dependencies.\nFor better debugging I dumped the traceback to debug.'.format(
+                        sequence_name
+                    )
+                )
+                self.log.debug('{0!s}'.format(traceback.format_exc()))
                 return None
 
         # Conversion for backwards compatibility
