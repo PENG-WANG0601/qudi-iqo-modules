@@ -21,6 +21,7 @@ If not, see <https://www.gnu.org/licenses/>.
 """
 
 import os
+import time
 import datetime
 import numpy as np
 import pyqtgraph as pg
@@ -39,6 +40,7 @@ from PySide6 import QtCore, QtWidgets
 from qudi.util.widgets.scientific_spinbox import ScienDSpinBox, ScienSpinBox
 from qudi.util.widgets.loading_indicator import CircleLoadingIndicator
 
+from qudi.gui.correlation.correlation_main_window import BoundedSpinBox, CHANNEL_TRIGGER_LEVEL_RANGE_MV
 from qudi.logic.pulsed.pulsed_master_logic import PulsedMasterLogic
 from qudi.logic.pulsed.sampling_functions import PulseEnvelope, PulseEnvelopeType
 
@@ -169,7 +171,15 @@ class PulsedMeasurementGui(GuiBase):
     _ana_param_second_plot_y_axis_unit_text = StatusVar('ana_param_second_plot_y_axis_unit_LineEdit', '')
 
     _show_raw_data = StatusVar(default=False)
+    _fast_display_raw = StatusVar(default=False)
     _show_laser_index = StatusVar(default=0)
+
+    # Raw laser trace can be hundreds of thousands to millions of bins long. "Fast display"
+    # redraws it as a small, fixed-size decimated trace at a capped rate instead, trading
+    # resolution for a GUI that stays responsive (same 5 Hz convention used elsewhere in the
+    # pulsed/correlation GUIs for live-updating plots).
+    _FAST_DISPLAY_TARGET_POINTS = 2000
+    _FAST_DISPLAY_MIN_INTERVAL_S = 0.2
     _ana_param_errorbars = StatusVar('ana_param_errorbars_CheckBox', False)
     _predefined_methods_to_show = StatusVar('predefined_methods_to_show', [])
 
@@ -392,6 +402,10 @@ class PulsedMeasurementGui(GuiBase):
 
         self._pa.ana_param_record_length_DoubleSpinBox.editingFinished.connect(self.fast_counter_settings_changed)
         self._pa.ana_param_fc_bins_ComboBox.currentIndexChanged.connect(self.fast_counter_settings_changed)
+        if self._detection_channel_ComboBox is not None:
+            self._detection_channel_ComboBox.currentIndexChanged.connect(
+                self.fast_counter_settings_changed)
+            self._detection_level_SpinBox.editingFinished.connect(self.fast_counter_settings_changed)
 
         self._pa.time_param_ana_periode_DoubleSpinBox.editingFinished.connect(self.measurement_timer_changed)
         self._pa.ana_param_errorbars_CheckBox.toggled.connect(self.toggle_error_bars)
@@ -425,6 +439,10 @@ class PulsedMeasurementGui(GuiBase):
 
         self._pe.laserpulses_ComboBox.currentIndexChanged.connect(self.update_laser_data)
         self._pe.laserpulses_display_raw_CheckBox.stateChanged.connect(self.update_laser_data)
+        self._pe.laserpulses_display_raw_CheckBox.stateChanged.connect(
+            self._pe.laserpulses_fast_display_CheckBox.setEnabled
+        )
+        self._pe.laserpulses_fast_display_CheckBox.stateChanged.connect(self.update_laser_data)
         return
 
     def _connect_predefined_methods_tab_signals(self):
@@ -556,6 +574,10 @@ class PulsedMeasurementGui(GuiBase):
 
         self._pa.ana_param_record_length_DoubleSpinBox.editingFinished.disconnect()
         self._pa.ana_param_fc_bins_ComboBox.currentIndexChanged.disconnect()
+        if self._detection_channel_ComboBox is not None:
+            self._detection_channel_ComboBox.currentIndexChanged.disconnect()
+            self._detection_level_SpinBox.editingFinished.disconnect(
+                self.fast_counter_settings_changed)
 
         self._pa.time_param_ana_periode_DoubleSpinBox.editingFinished.disconnect()
         self._pa.ana_param_errorbars_CheckBox.toggled.disconnect()
@@ -576,6 +598,7 @@ class PulsedMeasurementGui(GuiBase):
 
         self._pe.laserpulses_ComboBox.currentIndexChanged.disconnect()
         self._pe.laserpulses_display_raw_CheckBox.stateChanged.disconnect()
+        self._pe.laserpulses_fast_display_CheckBox.stateChanged.disconnect()
         return
 
     def _disconnect_predefined_methods_tab_signals(self):
@@ -780,6 +803,9 @@ class PulsedMeasurementGui(GuiBase):
             self._pa.ana_param_record_length_DoubleSpinBox.setEnabled(False)
             self._pa.ext_control_use_mw_CheckBox.setEnabled(False)
             self._pa.ana_param_fc_bins_ComboBox.setEnabled(False)
+            if self._detection_channel_ComboBox is not None:
+                self._detection_channel_ComboBox.setEnabled(False)
+                self._detection_level_SpinBox.setEnabled(False)
             self._pa.ana_param_ignore_first_CheckBox.setEnabled(False)
             self._pa.ana_param_ignore_last_CheckBox.setEnabled(False)
             self._pa.ana_param_alternating_CheckBox.setEnabled(False)
@@ -809,6 +835,9 @@ class PulsedMeasurementGui(GuiBase):
             self._pa.ext_control_mw_freq_DoubleSpinBox.setEnabled(True)
             self._pa.ext_control_mw_power_DoubleSpinBox.setEnabled(True)
             self._pa.ana_param_fc_bins_ComboBox.setEnabled(True)
+            if self._detection_channel_ComboBox is not None:
+                self._detection_channel_ComboBox.setEnabled(True)
+                self._detection_level_SpinBox.setEnabled(True)
             self._pg.load_ensemble_PushButton.setEnabled(True)
             self._pg.curr_ensemble_del_all_PushButton.setEnabled(True)
             self._sg.curr_sequence_del_all_PushButton.setEnabled(True)
@@ -2395,6 +2424,8 @@ class PulsedMeasurementGui(GuiBase):
         self._pa.ana_param_x_axis_inc_ScienDSpinBox.setMaximum(np.inf)
         self._pa.ana_param_x_axis_inc_ScienDSpinBox.setMinimum(-np.inf)
 
+        self._create_detection_widgets()
+
         # apply hardware constraints
         self._pa_apply_hardware_constraints()
 
@@ -2431,6 +2462,39 @@ class PulsedMeasurementGui(GuiBase):
         """
         self._ana_param_errorbars = self._pa.ana_param_errorbars_CheckBox.isChecked()
         return
+
+    def _create_detection_widgets(self):
+        """ Add photon detection channel/level controls to the measurement parameters, only for
+        fast counters that expose per-input trigger control (e.g. the snAPI MultiHarp module).
+        """
+        self._detection_channel_ComboBox = None
+        self._detection_level_SpinBox = None
+        channels = self.pulsedmasterlogic().fast_counter_constraints.get('photon_channel_list')
+        if not channels:
+            return
+
+        grid = self._pa.findChild(QtWidgets.QGridLayout, 'gridLayout_25')
+        align = QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter
+
+        self._detection_channel_ComboBox = QtWidgets.QComboBox()
+        for channel in channels:
+            self._detection_channel_ComboBox.addItem(f'Channel {channel}', channel)
+        self._detection_level_SpinBox = BoundedSpinBox(*CHANNEL_TRIGGER_LEVEL_RANGE_MV)
+        self._detection_level_SpinBox.setSuffix(' mV')
+        self._detection_level_SpinBox.setToolTip(
+            'Trigger level of the detection channel, {0} to {1} mV. Out-of-range input keeps the '
+            'previous value. The trigger edge is set in the fast counter config.'.format(
+                *CHANNEL_TRIGGER_LEVEL_RANGE_MV)
+        )
+
+        channel_label = QtWidgets.QLabel('Detection channel:')
+        channel_label.setAlignment(align)
+        level_label = QtWidgets.QLabel('Detection level:')
+        level_label.setAlignment(align)
+        grid.addWidget(channel_label, 3, 0)
+        grid.addWidget(self._detection_channel_ComboBox, 3, 1)
+        grid.addWidget(level_label, 4, 0)
+        grid.addWidget(self._detection_level_SpinBox, 4, 1)
 
     def _pa_apply_hardware_constraints(self):
         """
@@ -2645,6 +2709,9 @@ class PulsedMeasurementGui(GuiBase):
         settings_dict = dict()
         settings_dict['record_length'] = self._pa.ana_param_record_length_DoubleSpinBox.value()
         settings_dict['bin_width'] = float(self._pa.ana_param_fc_bins_ComboBox.currentText())
+        if self._detection_channel_ComboBox is not None:
+            settings_dict['detection_channel'] = self._detection_channel_ComboBox.currentData()
+            settings_dict['detection_level_mv'] = self._detection_level_SpinBox.value()
         self.pulsedmasterlogic().set_fast_counter_settings(settings_dict)
         return
 
@@ -2663,6 +2730,14 @@ class PulsedMeasurementGui(GuiBase):
         if 'bin_width' in settings_dict:
             index = self._pa.ana_param_fc_bins_ComboBox.findText(str(settings_dict['bin_width']))
             self._pa.ana_param_fc_bins_ComboBox.setCurrentIndex(index)
+        if self._detection_channel_ComboBox is not None:
+            if 'detection_channel' in settings_dict:
+                self._detection_channel_ComboBox.blockSignals(True)
+                self._detection_channel_ComboBox.setCurrentIndex(
+                    self._detection_channel_ComboBox.findData(settings_dict['detection_channel']))
+                self._detection_channel_ComboBox.blockSignals(False)
+            if 'detection_level_mv' in settings_dict:
+                self._detection_level_SpinBox.setValue(settings_dict['detection_level_mv'])
         if 'is_gated' in settings_dict:
             if settings_dict.get('is_gated'):
                 self._pg.gen_gatechannel_ComboBox.setEnabled(True)
@@ -2958,11 +3033,15 @@ class PulsedMeasurementGui(GuiBase):
         # Initialize widgets
         number_of_lasers = self.pulsedmasterlogic().measurement_settings['number_of_lasers']
         self._pe.laserpulses_display_raw_CheckBox.blockSignals(True)
+        self._pe.laserpulses_fast_display_CheckBox.blockSignals(True)
         self._pe.laserpulses_ComboBox.blockSignals(True)
         self._pe.extract_param_analysis_method_comboBox.blockSignals(True)
         self._pe.extract_param_method_comboBox.blockSignals(True)
 
         self._pe.laserpulses_display_raw_CheckBox.setChecked(self._show_raw_data)
+        self._pe.laserpulses_fast_display_CheckBox.setChecked(self._fast_display_raw)
+        self._pe.laserpulses_fast_display_CheckBox.setEnabled(self._show_raw_data)
+        self.__last_fast_display_update = 0.0
 
         self._pe.laserpulses_ComboBox.clear()
         self._pe.laserpulses_ComboBox.addItem('sum')
@@ -2978,6 +3057,7 @@ class PulsedMeasurementGui(GuiBase):
             list(self.pulsedmasterlogic().extraction_methods))
 
         self._pe.laserpulses_display_raw_CheckBox.blockSignals(False)
+        self._pe.laserpulses_fast_display_CheckBox.blockSignals(False)
         self._pe.laserpulses_ComboBox.blockSignals(False)
         self._pe.extract_param_analysis_method_comboBox.blockSignals(False)
         self._pe.extract_param_method_comboBox.blockSignals(False)
@@ -2994,6 +3074,7 @@ class PulsedMeasurementGui(GuiBase):
     def _deactivate_extraction_ui(self):
         self._show_laser_index = self._pe.laserpulses_ComboBox.currentIndex()
         self._show_raw_data = self._pe.laserpulses_display_raw_CheckBox.isChecked()
+        self._fast_display_raw = self._pe.laserpulses_fast_display_CheckBox.isChecked()
         return
 
     @QtCore.Slot()
@@ -3224,6 +3305,18 @@ class PulsedMeasurementGui(GuiBase):
         """
         laser_index = self._pe.laserpulses_ComboBox.currentIndex()
         show_raw = self._pe.laserpulses_display_raw_CheckBox.isChecked()
+        fast_display = show_raw and self._pe.laserpulses_fast_display_CheckBox.isChecked()
+
+        # Fast display redraws at a capped rate (same 5 Hz convention as the correlation GUI's
+        # live plot) rather than on every single analysis tick -- the raw trace can be called
+        # far more often than that, and the decimation below is wasted work if nothing on screen
+        # would change in between.
+        if fast_display:
+            now = time.monotonic()
+            if now - self.__last_fast_display_update < self._FAST_DISPLAY_MIN_INTERVAL_S:
+                return
+            self.__last_fast_display_update = now
+
         is_gated = len(self.pulsedmasterlogic().raw_data.shape) > 1
 
         # Determine the right array to plot as y-data
@@ -3244,6 +3337,17 @@ class PulsedMeasurementGui(GuiBase):
         # Calculate the x-axis of the laser plot here
         bin_width = self.pulsedmasterlogic().fast_counter_settings['bin_width']
         x_data = np.arange(y_data.size, dtype=float) * bin_width
+
+        # Fast display: collapse the trace to a small, fixed number of points (rebinning, not
+        # just plot-time downsampling) so that both the numpy work above and pyqtgraph's own
+        # rendering stay cheap regardless of how fine the actual acquisition bin width/record
+        # length is. Averaging (not peak-picking) is used so the displayed height still reads as
+        # a count rate.
+        if fast_display and y_data.size > self._FAST_DISPLAY_TARGET_POINTS:
+            factor = y_data.size // self._FAST_DISPLAY_TARGET_POINTS
+            trimmed_size = (y_data.size // factor) * factor
+            y_data = y_data[:trimmed_size].reshape(-1, factor).mean(axis=1)
+            x_data = x_data[:trimmed_size].reshape(-1, factor).mean(axis=1)
 
         # Plot data
         self.lasertrace_image.setData(x=x_data, y=y_data)

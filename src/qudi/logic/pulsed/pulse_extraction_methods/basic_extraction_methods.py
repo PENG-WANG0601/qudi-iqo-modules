@@ -382,11 +382,14 @@ class BasicPulseExtractor(PulseExtractorBase):
         num_col = max_laser_length + 2 * safety_bins
         # compute from laser_start_indices and laser length the respective position of the laser
         # pulses
+        # Zero-pad so windows reaching past either end of the record (e.g. the last pulse when
+        # delay + safety exceed the idle time after it) are cut short instead of raising IndexError.
+        pad = num_col + abs(delay_bins)
+        padded_data = np.pad(count_data, pad)
         laser_pulses = np.empty((num_rows, num_col))
         for ii in range(num_rows):
-            laser_pulses[ii][:] = count_data[
-                np.arange(laser_rising_bins[ii] + delay_bins - safety_bins,
-                          laser_rising_bins[ii] + delay_bins + safety_bins + max_laser_length)]
+            start = laser_rising_bins[ii] + delay_bins - safety_bins + pad
+            laser_pulses[ii][:] = padded_data[start:start + num_col]
         # use the gated extraction method
         return_dict = self.gated_conv_deriv(laser_pulses, conv_std_dev)
         return return_dict

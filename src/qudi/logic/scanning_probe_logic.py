@@ -81,6 +81,9 @@ class ScanningProbeLogic(LogicBase):
     sigScannerTargetChanged = QtCore.Signal(dict, object)
     sigScanSettingsChanged = QtCore.Signal()
     sigTiltCorrSettingsChanged = QtCore.Signal(dict)
+    # Emitted right before the scanner hardware is configured (i.e. before it reserves its
+    # resources). Connect with DirectConnection to free shared hardware resources in time.
+    sigScanAboutToStart = QtCore.Signal()
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -581,6 +584,7 @@ class ScanningProbeLogic(LogicBase):
             self._curr_caller_id = self.module_uuid if caller_id is None else caller_id
 
             self.module_state.lock()
+            self.sigScanAboutToStart.emit()
             settings = self.create_scan_settings(tuple(scan_axes))
             back_settings = self.create_back_scan_settings(tuple(scan_axes))
             self.log.debug('Attempting to configure scanner...')

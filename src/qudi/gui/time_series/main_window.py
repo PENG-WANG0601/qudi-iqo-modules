@@ -199,7 +199,15 @@ class TimeSeriesGuiMainWindow(QtWidgets.QMainWindow):
         label = QtWidgets.QLabel('Current value channel:')
         label.setAlignment(QtCore.Qt.AlignmentFlag.AlignVCenter | QtCore.Qt.AlignmentFlag.AlignRight)
         label.setSizePolicy(QtWidgets.QSizePolicy.Policy.MinimumExpanding, QtWidgets.QSizePolicy.Policy.Preferred)
-        layout.addWidget(label, 0, 0)
+        self.separate_axes_checkbox = QtWidgets.QCheckBox('Separate y-axes')
+        self.separate_axes_checkbox.setToolTip(
+            'Plot two channels with independent left/right y-axes (each scaled to its own range) '
+            'instead of one common y-axis.'
+        )
+        top_layout = QtWidgets.QHBoxLayout()
+        top_layout.addWidget(self.separate_axes_checkbox)
+        top_layout.addWidget(label)
+        layout.addLayout(top_layout, 0, 0)
         layout.addWidget(self.current_value_combobox, 0, 1)
         layout.addWidget(self.current_value_label, 1, 0, 1, 2)
         layout.addWidget(self.trace_plot_widget, 2, 0, 1, 2)

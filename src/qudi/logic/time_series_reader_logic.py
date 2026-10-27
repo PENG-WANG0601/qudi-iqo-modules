@@ -21,6 +21,7 @@ If not, see <https://www.gnu.org/licenses/>.
 
 import numpy as np
 import datetime as dt
+from functools import partial
 import matplotlib.pyplot as plt
 from PySide6 import QtCore
 from scipy.signal import decimate
@@ -51,8 +52,16 @@ class TimeSeriesReaderLogic(LogicBase):
             max_frame_rate: 20  # optional (default: 20Hz)
             channel_buffer_size: 1048576  # optional (default: 1MSample)
             max_raw_data_bytes: 1073741824  # optional (default: 1GB)
+            scan_paused_channels: ['PFI9']  # optional, channels to pause while scan_logic is scanning
+            scan_resume_delay: 1.0  # optional (default: 1s), idle time before resuming paused channels
         connect:
             streamer: <streamer_name>
+            scan_logic: <scanning_probe_logic_name>  # optional, needed for scan_paused_channels
+
+    Channels listed in "scan_paused_channels" are removed from the hardware stream whenever the
+    connected scanning probe logic starts a scan (or optimization) and are added back once it has
+    been idle for "scan_resume_delay" seconds. This frees hardware resources (e.g. NI counters)
+    shared with the scanner. All other channels keep streaming; paused channels show NaN.
     """
     # declare signals
     sigDataChanged = QtCore.Signal(object, object, object, object)
@@ -64,6 +73,7 @@ class TimeSeriesReaderLogic(LogicBase):
 
     # declare connectors
     _streamer = Connector(name='streamer', interface=DataInStreamInterface)
+    _scan_logic = Connector(name='scan_logic', interface='ScanningProbeLogic', optional=True)
 
     # config options
     _max_frame_rate = ConfigOption('max_frame_rate', default=20, missing='warn')
@@ -75,6 +85,10 @@ class TimeSeriesReaderLogic(LogicBase):
                                        default=1024**3,
                                        missing='info',
                                        constructor=lambda x: int(round(x)))
+    _scan_paused_channel_names = ConfigOption(name='scan_paused_channels',
+                                              default=list(),
+                                              missing='nothing')
+    _scan_resume_delay = ConfigOption(name='scan_resume_delay', default=1.0, missing='nothing')
 
     # status vars
     _trace_window_size = StatusVar('trace_window_size', default=6)
@@ -116,6 +130,14 @@ class TimeSeriesReaderLogic(LogicBase):
 
         # important to know for method of reading the buffer
         self._streamer_is_remote = False
+
+        # Channels enabled by the user vs. channels actually streamed by the hardware. They differ
+        # while channels are paused during a scan.
+        self._enabled_channels = list()
+        self._hw_channels = list()
+        self._paused_channels = set()
+        self._pause_generation = 0
+        self._start_after_resume = False
 
     def on_activate(self) -> None:
         """ Initialisation performed during activation of the module. """
@@ -164,16 +186,23 @@ class TimeSeriesReaderLogic(LogicBase):
             self._moving_average_width += 1
 
         # set settings in streamer hardware
+        self._enabled_channels = list(netobtain(streamer.active_channels))
+        self._hw_channels = self._enabled_channels.copy()
+        self._paused_channels = set()
+        self._pause_generation = 0
+        self._start_after_resume = False
         self.set_channel_settings(self._active_channels, self._averaged_channels)
         self.set_trace_settings(data_rate=self._data_rate)
         # set up internal frame loop connection
         self._sigNextDataFrame.connect(self._acquire_data_block, QtCore.Qt.ConnectionType.QueuedConnection)
+        self._connect_scan_logic(avail_channels)
 
     def on_deactivate(self) -> None:
         """ De-initialisation performed during deactivation of the module.
         """
         try:
             self._sigNextDataFrame.disconnect()
+            self._disconnect_scan_logic()
             # Stop measurement
             if self.module_state() == 'locked':
                 self._stop()
@@ -277,8 +306,10 @@ class TimeSeriesReaderLogic(LogicBase):
 
     @property
     def active_channel_names(self) -> List[str]:
-        """ Read-only property returning the currently active channel names """
-        return netobtain(self._streamer().active_channels.copy())
+        """ Read-only property returning the currently active channel names (including channels
+        that are temporarily paused during a scan)
+        """
+        return self._enabled_channels.copy()
 
     @property
     def averaged_channel_names(self) -> List[str]:
@@ -377,7 +408,7 @@ class TimeSeriesReaderLogic(LogicBase):
             with self._threadlock:
                 # Apply settings to hardware if needed
                 self._streamer().configure(
-                    active_channels=self.active_channel_names,
+                    active_channels=self._hw_channels if self._hw_channels else self.active_channel_names,
                     streaming_mode=StreamingMode.CONTINUOUS,
                     channel_buffer_size=self._channel_buffer_size,
                     sample_rate=settings['data_rate'] * settings['oversampling_factor']
@@ -418,12 +449,18 @@ class TimeSeriesReaderLogic(LogicBase):
             self._stop()
 
         try:
-            self._streamer().configure(
-                active_channels=enabled,
-                streaming_mode=StreamingMode.CONTINUOUS,
-                channel_buffer_size=self._channel_buffer_size,
-                sample_rate=self.sampling_rate
-            )
+            enabled = list(enabled)
+            hw_channels = [ch for ch in enabled if ch not in self._paused_channels]
+            # If all enabled channels are paused, keep the old hardware config until resumed
+            if hw_channels or not enabled:
+                self._streamer().configure(
+                    active_channels=hw_channels,
+                    streaming_mode=StreamingMode.CONTINUOUS,
+                    channel_buffer_size=self._channel_buffer_size,
+                    sample_rate=self.sampling_rate
+                )
+            self._enabled_channels = enabled
+            self._hw_channels = hw_channels
             self._averaged_channels = [ch for ch in averaged if ch in enabled]
             self._init_data_arrays()
         except:
@@ -443,6 +480,11 @@ class TimeSeriesReaderLogic(LogicBase):
             if self.module_state() == 'locked':
                 self.log.warning('Data acquisition already running. "start_reading" call ignored.')
                 self.sigStatusChanged.emit(True, self._data_recording_active)
+                return
+            if self._enabled_channels and not self._hw_channels:
+                self.log.info('All active channels are paused during the running scan. Data '
+                              'acquisition will start once the scan has finished.')
+                self._start_after_resume = True
                 return
 
             self.module_state.lock()
@@ -512,8 +554,8 @@ class TimeSeriesReaderLogic(LogicBase):
                         self._times_buffer = netobtain(self._times_buffer)
 
                     # Process data
-                    channel_count = len(self.active_channel_names)
-                    data_view = self._data_buffer[:channel_count * samples_to_read]
+                    data_view = self._data_buffer[:len(self._hw_channels) * samples_to_read]
+                    data_view = self._insert_paused_channels(data_view, samples_to_read)
                     self._process_trace_data(data_view)
                     if self._times_buffer is None:
                         times_view = None
@@ -531,6 +573,111 @@ class TimeSeriesReaderLogic(LogicBase):
                     self._stop_cleanup()
                     return
                 self._sigNextDataFrame.emit()
+
+    def _insert_paused_channels(self, data: np.ndarray, samples: int) -> np.ndarray:
+        """ Expands interleaved hardware data to all enabled channels. Paused channels are filled
+        with NaN (or 0 for integer data).
+        """
+        if len(self._hw_channels) == len(self._enabled_channels):
+            return data
+        fill_value = np.nan if np.issubdtype(data.dtype, np.floating) else 0
+        full_data = np.full([samples, len(self._enabled_channels)], fill_value, dtype=data.dtype)
+        hw_data = data.reshape([samples, len(self._hw_channels)])
+        for hw_index, ch in enumerate(self._hw_channels):
+            full_data[:, self._enabled_channels.index(ch)] = hw_data[:, hw_index]
+        return full_data.reshape(-1)
+
+    def _connect_scan_logic(self, avail_channels: Sequence[str]) -> None:
+        scan_logic = self._scan_logic()
+        if scan_logic is None or not self._scan_paused_channel_names:
+            return
+        # Match configured names case-insensitively against the streamer channel names
+        lower_names = {ch.lower(): ch for ch in avail_channels}
+        self._scan_paused_channel_names = [
+            lower_names[name.lower()] for name in self._scan_paused_channel_names
+            if name.lower() in lower_names
+        ]
+        if not self._scan_paused_channel_names:
+            self.log.warning('None of the configured "scan_paused_channels" is a valid streamer '
+                             f'channel {avail_channels}. Pausing channels during scans disabled.')
+            return
+        # DirectConnection: channels must be released before the scanner reserves its resources
+        scan_logic.sigScanAboutToStart.connect(self._pause_for_scan,
+                                               QtCore.Qt.ConnectionType.DirectConnection)
+        scan_logic.sigScanStateChanged.connect(self._scan_state_changed,
+                                               QtCore.Qt.ConnectionType.QueuedConnection)
+
+    def _disconnect_scan_logic(self) -> None:
+        scan_logic = self._scan_logic()
+        if scan_logic is None or not self._scan_paused_channel_names:
+            return
+        for signal, slot in [(scan_logic.sigScanAboutToStart, self._pause_for_scan),
+                             (scan_logic.sigScanStateChanged, self._scan_state_changed)]:
+            try:
+                signal.disconnect(slot)
+            except (RuntimeError, TypeError):
+                pass
+
+    def _pause_for_scan(self) -> None:
+        """ Called (in the scan logic thread) right before a scan configures the hardware """
+        with self._threadlock:
+            self._pause_generation += 1
+            if not self._paused_channels:
+                try:
+                    self._apply_paused_channels(set(self._scan_paused_channel_names))
+                except Exception:
+                    self.log.exception('Unable to pause channels for scan:')
+
+    def _scan_state_changed(self, is_running: bool, *args) -> None:
+        if not is_running and self._paused_channels:
+            QtCore.QTimer.singleShot(int(round(1000 * self._scan_resume_delay)),
+                                     partial(self._resume_after_scan, self._pause_generation))
+
+    def _resume_after_scan(self, generation: int) -> None:
+        # Skip if a new scan (e.g. the next optimizer step) has started in the meantime
+        if generation != self._pause_generation or self._scan_logic().module_state() != 'idle':
+            return
+        with self._threadlock:
+            if generation != self._pause_generation or not self._paused_channels:
+                return
+            try:
+                self._apply_paused_channels(set())
+            except Exception:
+                self.log.exception('Unable to resume paused channels after scan:')
+                return
+            start = self._start_after_resume
+            self._start_after_resume = False
+        if start:
+            self.start_reading()
+
+    def _apply_paused_channels(self, paused: set) -> None:
+        """ Reconfigures the hardware stream to exclude paused channels without touching the trace
+        data of the remaining channels. Must be called with self._threadlock acquired.
+        """
+        self._paused_channels = paused
+        hw_channels = [ch for ch in self._enabled_channels if ch not in paused]
+        if hw_channels == self._hw_channels:
+            return
+        running = self.module_state() == 'locked'
+        streamer = self._streamer()
+        if running:
+            streamer.stop_stream()
+        if not hw_channels:
+            # Nothing left to stream: stop the trace and restart it once resumed
+            self._hw_channels = hw_channels
+            if running:
+                self._stop_cleanup()
+                self._start_after_resume = True
+            return
+        streamer.configure(active_channels=hw_channels,
+                           streaming_mode=StreamingMode.CONTINUOUS,
+                           channel_buffer_size=self._channel_buffer_size,
+                           sample_rate=self.sampling_rate)
+        self._hw_channels = hw_channels
+        if running:
+            streamer.start_stream()
+        self.log.debug(f'Hardware stream channels changed to {hw_channels} '
+                       f'(paused: {sorted(paused)}).')
 
     def _process_trace_times(self, times_buffer: np.ndarray) -> None:
         if self.oversampling_factor > 1:

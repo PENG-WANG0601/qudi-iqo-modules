@@ -71,6 +71,7 @@ class TimeSeriesGui(GuiBase):
     _visible_traces = StatusVar(name='visible_traces', default=dict())
     _current_value_channel_precision = StatusVar(name='current_value_channel_precision',
                                                  default=dict())
+    _separate_y_axes = StatusVar(name='separate_y_axes', default=False)
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -168,6 +169,8 @@ class TimeSeriesGui(GuiBase):
         self._mw.current_value_combobox.currentIndexChanged.connect(
             self._current_value_channel_changed
         )
+        self._mw.separate_axes_checkbox.setChecked(bool(self._separate_y_axes))
+        self._mw.separate_axes_checkbox.toggled.connect(self._separate_axes_toggled)
 
         # Connect the default view and settings actions
         self._mw.restore_default_view_action.triggered.connect(self._restore_default_view)
@@ -226,6 +229,7 @@ class TimeSeriesGui(GuiBase):
         self._mw.settings_dockwidget.oversampling_spinbox.editingFinished.disconnect()
         self._mw.settings_dockwidget.moving_average_spinbox.editingFinished.disconnect()
         self._mw.restore_default_view_action.triggered.disconnect()
+        self._mw.separate_axes_checkbox.toggled.disconnect()
         self.sigStartCounter.disconnect()
         self.sigStopCounter.disconnect()
         self.sigStartRecording.disconnect()
@@ -286,6 +290,13 @@ class TimeSeriesGui(GuiBase):
             self._visible_traces[chnl] = (show_data, show_average)
             self._current_value_channel_precision[chnl] = precision
 
+    @QtCore.Slot(bool)
+    def _separate_axes_toggled(self, checked: bool) -> None:
+        self._separate_y_axes = checked
+        logic = self._time_series_logic_con()
+        self.update_channel_settings(*logic.channel_settings)
+        self.update_data(*logic.trace_data, *logic.averaged_trace_data)
+
     def _apply_channel_settings(self, setting):
         self.sigChannelSettingsChanged.emit(
             [ch for ch, (enabled, _) in setting.items() if enabled],
@@ -337,7 +348,7 @@ class TimeSeriesGui(GuiBase):
             self._mw.trace_plot_widget.hideAxis('right')
             self._channels_per_axis = [tuple(enabled), tuple()]
             self._mw.trace_plot_widget.setLabel('left', 'Signal', units='')
-        elif len(enabled) == 2:
+        elif len(enabled) == 2 and self._separate_y_axes:
             self._mw.trace_plot_widget.hideAxis('right')
             self._channels_per_axis = [(enabled[0],), (enabled[1],)]
             self._mw.trace_plot_widget.setLabel('left',
@@ -346,7 +357,7 @@ class TimeSeriesGui(GuiBase):
             self._mw.trace_plot_widget.setLabel('right',
                                                 enabled[1],
                                                 units=channel_units[enabled[1]])
-        elif len(enabled) > 2:
+        elif len(enabled) >= 2:
             self._mw.trace_plot_widget.hideAxis('right')
             self._channels_per_axis = [tuple(enabled), tuple()]
             self._mw.trace_plot_widget.setLabel('left', 'Signal', units=different_units[0])

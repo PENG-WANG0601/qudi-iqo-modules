@@ -34,6 +34,7 @@ from PySide6 import QtCore
 from qudi.core.connector import Connector
 from qudi.core.module import GuiBase
 from qudi.util.colordefs import QudiPalettePale as palette
+from qudi.util.widgets.fitting import FitConfigurationDialog
 from qudi.gui.correlation.correlation_main_window import CorrelationMainWindow
 from qudi.logic.correlation_logic import CorrelationLogic
 
@@ -49,11 +50,20 @@ class CorrelationGui(GuiBase):
     sigStop = QtCore.Signal()
     sigConfigure = QtCore.Signal(dict)
     sigSetChannelTrigger = QtCore.Signal(int, int, int)  # channel, level_mv, edge
+    sigSetFitT0 = QtCore.Signal(float, bool)  # t0_s, fixed
+    sigSetLiveFit = QtCore.Signal(str)  # fit config name, '' = off
+
+    sigDoFit = QtCore.Signal(str)  # fit config name ('No Fit' clears the fit)
+
+    _default_fit_config = 'No Fit'
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._mw = None
         self._g2_curve = None
+        self._fit_curve = None
+        self._fcd = None
+        self._fitted_t0 = None
 
     def on_activate(self):
         self._mw = CorrelationMainWindow()
@@ -123,12 +133,69 @@ class CorrelationGui(GuiBase):
         logic.sigDataUpdated.connect(self.update_data, QtCore.Qt.ConnectionType.QueuedConnection)
         logic.sigStatusChanged.connect(self.update_status, QtCore.Qt.ConnectionType.QueuedConnection)
 
+        self._activate_fit_ui(logic)
+
         self.update_status(logic.is_running)
         self.show()
+
+    def _activate_fit_ui(self, logic):
+        # The fit curve stays on the plot permanently, drawn above the data; "no fit" = empty data.
+        # Only downsampled (it has 10x the data points), not clipped to the view, so it can never
+        # end up hidden by a stale clip range.
+        self._fit_curve = pg.PlotDataItem(pen=pg.mkPen(palette.c2, width=2))
+        self._fit_curve.setDownsampling(auto=True, method='mean')
+        self._fit_curve.setZValue(10)
+        self._mw.g2_plot_widget.addItem(self._fit_curve)
+
+        fw = self._mw.fit_dockwidget
+        fw.fit_widget.link_fit_container(logic.fc)
+        # Show the logic's current fit (e.g. after reopening the window), otherwise "No Fit"
+        start_config = logic.fit_config if logic.fit_result is not None else self._default_fit_config
+        start_index = fw.fit_widget.selection_combobox.findText(start_config)
+        fw.fit_widget.selection_combobox.setCurrentIndex(max(start_index, 0))
+        self._fcd = FitConfigurationDialog(parent=self._mw, fit_config_model=logic.fit_config_model)
+
+        t0_s, t0_fixed = logic.fit_t0
+        fw.t0_spinbox.setValue(t0_s)
+        fw.t0_fixed_checkbox.setChecked(t0_fixed)
+
+        self._mw.fit_settings_action.triggered.connect(self._fcd.show)
+        fw.fit_widget.sigDoFit.connect(self.sigDoFit)
+        self.sigDoFit.connect(logic.do_fit, QtCore.Qt.ConnectionType.QueuedConnection)
+        fw.t0_spinbox.editingFinished.connect(self._fit_t0_changed)
+        fw.t0_fixed_checkbox.toggled.connect(self._fit_t0_changed)
+        fw.use_fitted_t0_button.clicked.connect(self._use_fitted_t0)
+        fw.live_fit_checkbox.toggled.connect(self._live_fit_changed)
+        fw.fit_widget.selection_combobox.currentTextChanged.connect(self._fit_selection_changed)
+        self.sigSetFitT0.connect(logic.set_fit_t0, QtCore.Qt.ConnectionType.QueuedConnection)
+        self.sigSetLiveFit.connect(logic.set_live_fit, QtCore.Qt.ConnectionType.QueuedConnection)
+        logic.sigFitUpdated.connect(self.update_fit, QtCore.Qt.ConnectionType.QueuedConnection)
+
+        self.update_fit(logic.fit_config, logic.fit_result)
+
+    def _deactivate_fit_ui(self, logic):
+        fw = self._mw.fit_dockwidget
+        self.sigSetLiveFit.emit('')
+        self._mw.fit_settings_action.triggered.disconnect()
+        fw.fit_widget.sigDoFit.disconnect()
+        self.sigDoFit.disconnect()
+        fw.t0_spinbox.editingFinished.disconnect()
+        fw.t0_fixed_checkbox.toggled.disconnect()
+        fw.use_fitted_t0_button.clicked.disconnect()
+        fw.live_fit_checkbox.toggled.disconnect()
+        fw.fit_widget.selection_combobox.currentTextChanged.disconnect(self._fit_selection_changed)
+        self.sigSetFitT0.disconnect()
+        self.sigSetLiveFit.disconnect()
+        logic.sigFitUpdated.disconnect(self.update_fit)
+        fw.fit_widget.link_fit_container(None)
+        self._fcd.close()
+        self._fcd = None
+        self._fit_curve = None
 
     def on_deactivate(self):
         logic = self._logic()
 
+        self._deactivate_fit_ui(logic)
         self._mw.start_stop_action.triggered[bool].disconnect()
         self._mw.save_action.triggered.disconnect()
         sw = self._mw.settings_dockwidget
@@ -183,6 +250,41 @@ class CorrelationGui(GuiBase):
             edge = tw.edge_comboboxes[channel].currentData()
             self.sigSetChannelTrigger.emit(channel, level_mv, edge)
         return _slot
+
+    def _fit_t0_changed(self, *_args):
+        fw = self._mw.fit_dockwidget
+        self.sigSetFitT0.emit(fw.t0_spinbox.value(), fw.t0_fixed_checkbox.isChecked())
+
+    def _use_fitted_t0(self):
+        if self._fitted_t0 is not None:
+            self._mw.fit_dockwidget.t0_spinbox.setValue(self._fitted_t0)
+            self._fit_t0_changed()
+
+    def _live_fit_changed(self, *_args):
+        fw = self._mw.fit_dockwidget
+        config = fw.fit_widget.selection_combobox.currentText()
+        live = fw.live_fit_checkbox.isChecked() and config != 'No Fit'
+        self.sigSetLiveFit.emit(config if live else '')
+        if live:
+            # Fit right away instead of waiting for the next data update (also when idle)
+            self.sigDoFit.emit(config)
+
+    def _fit_selection_changed(self, config):
+        if config == 'No Fit':
+            # Selecting "No Fit" removes the fit (curve, result, saved fit metadata) immediately
+            self.sigDoFit.emit('No Fit')
+        self._live_fit_changed()
+
+    def update_fit(self, fit_config, result):
+        if not fit_config or fit_config == 'No Fit' or result is None:
+            self._fit_curve.setData([], [])
+            self._fitted_t0 = None
+        else:
+            fit_x, fit_y = result.high_res_best_fit
+            self._fit_curve.setData(x=fit_x, y=fit_y)
+            t0_param = result.params.get('t0')
+            self._fitted_t0 = None if t0_param is None else float(t0_param.value)
+        self._mw.fit_dockwidget.use_fitted_t0_button.setEnabled(self._fitted_t0 is not None)
 
     def update_data(self, tau, g2):
         self._g2_curve.setData(x=tau, y=g2)

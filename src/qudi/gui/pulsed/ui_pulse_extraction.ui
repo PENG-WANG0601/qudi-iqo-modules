@@ -249,7 +249,20 @@
           </property>
          </widget>
         </item>
-        <item row="1" column="0" colspan="3">
+        <item row="0" column="3">
+         <widget class="QCheckBox" name="laserpulses_fast_display_CheckBox">
+          <property name="enabled">
+           <bool>false</bool>
+          </property>
+          <property name="toolTip">
+           <string>Redraw the raw trace as a decimated, fixed-size curve at a capped rate (~5 Hz) instead of every full-resolution point on every update. Use this when "Display raw" makes the GUI sluggish or freezes with fine bin widths / long record lengths.</string>
+          </property>
+          <property name="text">
+           <string>Fast display</string>
+          </property>
+         </widget>
+        </item>
+        <item row="1" column="0" colspan="4">
          <widget class="PlotWidget" name="laserpulses_PlotWidget"/>
         </item>
        </layout>
@@ -279,6 +292,7 @@
   <tabstop>extract_param_ref_window_width_DSpinBox</tabstop>
   <tabstop>extract_param_method_comboBox</tabstop>
   <tabstop>laserpulses_display_raw_CheckBox</tabstop>
+  <tabstop>laserpulses_fast_display_CheckBox</tabstop>
   <tabstop>laserpulses_ComboBox</tabstop>
   <tabstop>laserpulses_PlotWidget</tabstop>
   <tabstop>measuring_error_PlotWidget</tabstop>

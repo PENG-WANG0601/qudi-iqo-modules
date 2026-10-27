@@ -20,12 +20,14 @@ If not, see <https://www.gnu.org/licenses/>.
 """
 
 __all__ = ['CHANNEL_CHOICES', 'CHANNEL_TRIGGER_LEVEL_RANGE_MV', 'BoundedSpinBox',
-          'CorrelationSettingsDockWidget', 'ChannelTriggerDockWidget', 'CorrelationMainWindow']
+          'CorrelationSettingsDockWidget', 'ChannelTriggerDockWidget', 'CorrelationFitDockWidget',
+          'CorrelationMainWindow']
 
 from pyqtgraph import PlotWidget
 from PySide6 import QtCore, QtWidgets, QtGui
 
 from qudi.util.widgets.scientific_spinbox import ScienDSpinBox
+from qudi.util.widgets.fitting import FitWidget
 
 # Display label -> snAPI channel number (1..4 = hardware inputs). Shared between the start/stop
 # channel selectors and the per-channel trigger table so both always agree. Sync (channel 0) is
@@ -223,6 +225,45 @@ class ChannelTriggerDockWidget(QtWidgets.QDockWidget):
         layout.setColumnStretch(3, 1)
 
 
+class CorrelationFitDockWidget(QtWidgets.QDockWidget):
+    """ Dock widget with the fit selection/result panel plus the global detuning (t0) setting
+    that applies to every fit model with a "t0" parameter.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, objectName='Fit', **kwargs)
+        self.setWindowTitle('Fit')
+
+        self.fit_widget = FitWidget()
+
+        self.t0_spinbox = ScienDSpinBox()
+        self.t0_spinbox.setSuffix('s')
+        self.t0_spinbox.setRange(-float('inf'), float('inf'))
+        self.t0_spinbox.setMinimumWidth(100)
+        self.t0_spinbox.setToolTip('Detuning t0 used by every g(2) fit model when "Fix t0" is on.')
+        self.t0_fixed_checkbox = QtWidgets.QCheckBox('Fix t0')
+        self.t0_fixed_checkbox.setToolTip('On: all fits use the t0 entered here and do not vary it.\n'
+                                          'Off: each fit estimates and fits t0 itself.')
+        self.use_fitted_t0_button = QtWidgets.QPushButton('Use fitted t0')
+        self.use_fitted_t0_button.setToolTip('Copy t0 from the last fit result into the field.')
+        self.use_fitted_t0_button.setEnabled(False)
+        self.live_fit_checkbox = QtWidgets.QCheckBox('Live fit')
+        self.live_fit_checkbox.setToolTip('Refit the selected configuration automatically while '
+                                          'data comes in (at most every few seconds).')
+
+        widget = QtWidgets.QWidget()
+        layout = QtWidgets.QGridLayout()
+        widget.setLayout(layout)
+        self.setWidget(widget)
+        layout.addWidget(_label('Detuning t0:'), 0, 0)
+        layout.addWidget(self.t0_spinbox, 0, 1)
+        layout.addWidget(self.t0_fixed_checkbox, 0, 2)
+        layout.addWidget(self.use_fitted_t0_button, 0, 3)
+        layout.addWidget(self.live_fit_checkbox, 0, 4)
+        layout.addWidget(self.fit_widget, 1, 0, 1, 6)
+        layout.setColumnStretch(5, 1)
+
+
 class CorrelationMainWindow(QtWidgets.QMainWindow):
     """ Main window for the g(2) correlation GUI. """
 
@@ -243,6 +284,12 @@ class CorrelationMainWindow(QtWidgets.QMainWindow):
         self.show_triggers_action = QtGui.QAction('Channel triggers', self)
         self.show_triggers_action.setCheckable(True)
         self.show_triggers_action.setToolTip('Show per-channel discriminator trigger settings.')
+        self.show_fit_action = QtGui.QAction('Fit', self)
+        self.show_fit_action.setCheckable(True)
+        self.show_fit_action.setToolTip('Show the fit panel.')
+        self.fit_settings_action = QtGui.QAction('Fit configuration...', self)
+        self.fit_settings_action.setToolTip('Add/edit fit configurations (model, estimator, '
+                                            'parameter bounds and fixing).')
         self.close_action = QtGui.QAction('Close', self)
         self.close_action.setShortcut(QtGui.QKeySequence(QtGui.Qt.Key.Key_Control | QtGui.Qt.Key.Key_Q))
 
@@ -263,6 +310,9 @@ class CorrelationMainWindow(QtWidgets.QMainWindow):
         menu = menubar.addMenu('View')
         menu.addAction(self.show_settings_action)
         menu.addAction(self.show_triggers_action)
+        menu.addAction(self.show_fit_action)
+        menu = menubar.addMenu('Fit')
+        menu.addAction(self.fit_settings_action)
         self.setMenuBar(menubar)
 
         # Central widget: status label + plot
@@ -283,8 +333,12 @@ class CorrelationMainWindow(QtWidgets.QMainWindow):
         self.addDockWidget(QtCore.Qt.DockWidgetArea.BottomDockWidgetArea, self.settings_dockwidget)
         self.trigger_dockwidget = ChannelTriggerDockWidget()
         self.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, self.trigger_dockwidget)
+        self.fit_dockwidget = CorrelationFitDockWidget()
+        self.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, self.fit_dockwidget)
 
         # Show/hide wiring
+        self.show_fit_action.triggered[bool].connect(self.fit_dockwidget.setVisible)
+        self.fit_dockwidget.visibilityChanged.connect(self.show_fit_action.setChecked)
         self.show_settings_action.triggered[bool].connect(self.settings_dockwidget.setVisible)
         self.settings_dockwidget.visibilityChanged.connect(self.show_settings_action.setChecked)
         self.show_triggers_action.triggered[bool].connect(self.trigger_dockwidget.setVisible)

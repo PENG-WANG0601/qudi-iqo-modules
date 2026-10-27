@@ -448,6 +448,9 @@ class SnapiFastCounter(FastCounterInterface):
             usable = binwidth_list
 
         constraints['hardware_binwidth_list'] = usable
+        constraints['photon_channel_list'] = list(
+            range(1, int(self._sn.deviceConfig['NumChans']) + 1)
+        )
         return constraints
 
     def configure(self, bin_width_s, record_length_s, number_of_gates=0):
@@ -735,6 +738,28 @@ class SnapiFastCounter(FastCounterInterface):
         if int(channel) == 0:
             return self.get_sync_trigger()
         return self.get_photon_trigger(channel)
+
+    def get_photon_channels(self) -> Tuple[int, ...]:
+        """ Input channels (1..N) currently counted as photons in the fast-counter histogram. """
+        return tuple(self._photon_channels)
+
+    def set_photon_channels(self, channels: Sequence[int]):
+        """ Select which input channels (1..N) are counted as photons. Not while running. """
+        if self._status in (2, 3):
+            raise RuntimeError('Cannot change photon channels while the counter is running.')
+        if self._sn is None:
+            raise RuntimeError('snAPI device is not active.')
+        channels = self._normalize_channel_list(channels)
+        number_of_inputs = int(self._sn.deviceConfig['NumChans'])
+        invalid = [ch for ch in channels if ch < 1 or ch > number_of_inputs]
+        if not channels or invalid:
+            raise ValueError(f'photon channels must be a non-empty subset of 1..{number_of_inputs}, '
+                             f'got {channels!r}.')
+        if self._trigger_marker is None and self._trigger_channel in channels:
+            raise ValueError(f'Channel {self._trigger_channel} is the trigger channel and cannot '
+                             f'also be a photon channel.')
+        self._photon_channels = tuple(channels)
+        self.log.info('Photon channels set to %s.', list(channels))
 
     # ------------------------------------------------------------------
     # g(2) correlation measurement

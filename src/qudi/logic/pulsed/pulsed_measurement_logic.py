@@ -223,6 +223,9 @@ class PulsedMeasurementLogic(LogicBase):
 
         # timer for measurement
         self.__analysis_timer = None
+        self._detection_supported = False
+        self._detection_channel = None
+        self._detection_level_mv = None
         self.__start_time = 0
         self.__elapsed_time = 0
         self.__elapsed_sweeps = 0
@@ -293,6 +296,16 @@ class PulsedMeasurementLogic(LogicBase):
         # Set default number of gates to a reasonable number for gated counters (>0 if gated)
         if self._fastcounter().is_gated() and self.__fast_counter_gates < 1:
             self.__fast_counter_gates = max(1, self._number_of_lasers)
+        # Detection channel/level is only offered by counters exposing per-input trigger control
+        # (e.g. the snAPI MultiHarp module); defaults come from the counter's own config.
+        fastcounter = self._fastcounter()
+        self._detection_supported = all(
+            hasattr(fastcounter, name) for name in
+            ('get_photon_channels', 'set_photon_channels', 'get_photon_trigger', 'set_photon_trigger')
+        )
+        if self._detection_supported:
+            self._detection_channel = int(fastcounter.get_photon_channels()[0])
+            self._detection_level_mv = int(fastcounter.get_photon_trigger(self._detection_channel)[0])
         self.set_fast_counter_settings()
 
         # Check and configure external microwave
@@ -358,6 +371,9 @@ class PulsedMeasurementLogic(LogicBase):
         settings_dict['record_length'] = float(self.__fast_counter_record_length)
         settings_dict['number_of_gates'] = int(self.__fast_counter_gates)
         settings_dict['is_gated'] = bool(self._fastcounter().is_gated())
+        if self._detection_supported:
+            settings_dict['detection_channel'] = self._detection_channel
+            settings_dict['detection_level_mv'] = self._detection_level_mv
         return settings_dict
 
     @fast_counter_settings.setter
@@ -402,6 +418,13 @@ class PulsedMeasurementLogic(LogicBase):
                 else:
                     self.__fast_counter_gates = 0
 
+            if self._detection_supported and ('detection_channel' in settings_dict
+                                              or 'detection_level_mv' in settings_dict):
+                self._apply_detection_settings(
+                    int(settings_dict.get('detection_channel', self._detection_channel)),
+                    int(settings_dict.get('detection_level_mv', self._detection_level_mv)),
+                )
+
             # Apply the settings to hardware
             self.__fast_counter_binwidth, \
             self.__fast_counter_record_length, \
@@ -417,6 +440,22 @@ class PulsedMeasurementLogic(LogicBase):
         # emit update signal for master (GUI or other logic module)
         self.sigFastCounterSettingsUpdated.emit(self.fast_counter_settings)
         return self.fast_counter_settings
+
+    def _apply_detection_settings(self, channel, level_mv):
+        """ Count only <channel> and set its trigger level; the edge stays as configured on the
+        counter (its config file), since only the level is meant to be tuned from the GUI.
+        """
+        fastcounter = self._fastcounter()
+        try:
+            if channel != self._detection_channel:
+                fastcounter.set_photon_channels([channel])
+                self._detection_channel = channel
+            edge = fastcounter.get_photon_trigger(channel)[1]
+            fastcounter.set_photon_trigger(channel, level_mv, edge)
+            self._detection_level_mv = level_mv
+        except Exception:
+            self.log.exception('Could not apply detection channel %s / level %s mV.',
+                               channel, level_mv)
 
     def fast_counter_on(self):
         """Switching on the fast counter
