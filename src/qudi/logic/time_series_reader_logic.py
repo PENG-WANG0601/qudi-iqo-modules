@@ -136,6 +136,7 @@ class TimeSeriesReaderLogic(LogicBase):
         self._enabled_channels = list()
         self._hw_channels = list()
         self._paused_channels = set()
+        self._pause_requests = dict()
         self._pause_generation = 0
         self._start_after_resume = False
 
@@ -189,6 +190,7 @@ class TimeSeriesReaderLogic(LogicBase):
         self._enabled_channels = list(netobtain(streamer.active_channels))
         self._hw_channels = self._enabled_channels.copy()
         self._paused_channels = set()
+        self._pause_requests = dict()
         self._pause_generation = 0
         self._start_after_resume = False
         self.set_channel_settings(self._active_channels, self._averaged_channels)
@@ -618,18 +620,49 @@ class TimeSeriesReaderLogic(LogicBase):
             except (RuntimeError, TypeError):
                 pass
 
+    def pause_channels(self, requester: str, channels: Sequence[str]) -> None:
+        """ Temporarily removes channels from the hardware stream (e.g. to free hardware resources
+        for another measurement). All other channels keep streaming; paused channels show NaN.
+        Channels stay paused until resume_channels is called with the same requester.
+
+        @param str requester: unique name of the module requesting the pause
+        @param list channels: channel names to pause (case-insensitive)
+        """
+        lower_names = {ch.lower(): ch for ch in self.streamer_constraints.channel_units}
+        invalid = [ch for ch in channels if ch.lower() not in lower_names]
+        if invalid:
+            self.log.warning(f'Unable to pause unknown channels {invalid} (requested by '
+                             f'"{requester}").')
+        paused = {lower_names[ch.lower()] for ch in channels if ch.lower() in lower_names}
+        with self._threadlock:
+            self._pause_requests[requester] = paused
+            self._update_paused_channels()
+
+    def resume_channels(self, requester: str) -> None:
+        """ Releases all channels paused by pause_channels for the given requester """
+        with self._threadlock:
+            if self._pause_requests.pop(requester, None) is None:
+                return
+            self._update_paused_channels()
+            start = self._start_after_resume and not self._paused_channels
+            if start:
+                self._start_after_resume = False
+        if start:
+            self.start_reading()
+
     def _pause_for_scan(self) -> None:
         """ Called (in the scan logic thread) right before a scan configures the hardware """
         with self._threadlock:
             self._pause_generation += 1
-            if not self._paused_channels:
+            if 'scan' not in self._pause_requests:
                 try:
-                    self._apply_paused_channels(set(self._scan_paused_channel_names))
+                    self._pause_requests['scan'] = set(self._scan_paused_channel_names)
+                    self._update_paused_channels()
                 except Exception:
                     self.log.exception('Unable to pause channels for scan:')
 
     def _scan_state_changed(self, is_running: bool, *args) -> None:
-        if not is_running and self._paused_channels:
+        if not is_running and 'scan' in self._pause_requests:
             QtCore.QTimer.singleShot(int(round(1000 * self._scan_resume_delay)),
                                      partial(self._resume_after_scan, self._pause_generation))
 
@@ -638,22 +671,19 @@ class TimeSeriesReaderLogic(LogicBase):
         if generation != self._pause_generation or self._scan_logic().module_state() != 'idle':
             return
         with self._threadlock:
-            if generation != self._pause_generation or not self._paused_channels:
+            if generation != self._pause_generation or 'scan' not in self._pause_requests:
                 return
-            try:
-                self._apply_paused_channels(set())
-            except Exception:
-                self.log.exception('Unable to resume paused channels after scan:')
-                return
-            start = self._start_after_resume
-            self._start_after_resume = False
-        if start:
-            self.start_reading()
+        try:
+            self.resume_channels('scan')
+        except Exception:
+            self.log.exception('Unable to resume paused channels after scan:')
 
-    def _apply_paused_channels(self, paused: set) -> None:
-        """ Reconfigures the hardware stream to exclude paused channels without touching the trace
-        data of the remaining channels. Must be called with self._threadlock acquired.
+    def _update_paused_channels(self) -> None:
+        """ Reconfigures the hardware stream to exclude all requested paused channels without
+        touching the trace data of the remaining channels.
+        Must be called with self._threadlock acquired.
         """
+        paused = set().union(*self._pause_requests.values())
         self._paused_channels = paused
         hw_channels = [ch for ch in self._enabled_channels if ch not in paused]
         if hw_channels == self._hw_channels:

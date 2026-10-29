@@ -48,6 +48,9 @@ class WavemeterLogic(LogicBase):
 
     wavemeter_scanning_logic:
         module.Class: 'wavemeter_scanning_logic_3.WavemeterLogic'
+        options:
+            count_channel: 'PFI8'  # optional, time series channel used as counts (needed if >1 active)
+            paused_channels: ['PFI9']  # optional, time series channels paused while scanning
         connect:
             streamer: wavemeter
             counterlogic: time_series_reader_logic
@@ -58,6 +61,8 @@ class WavemeterLogic(LogicBase):
     sigStatusChangedDisplaying = QtCore.Signal()
     sigNewWavelength2 = QtCore.Signal(object, object)
     sigFitChanged = QtCore.Signal(str, dict)  # fit_name, fit_results
+    sigCountChannelChanged = QtCore.Signal(list, str)  # available channels, selected channel
+    sigChannelDataChanged = QtCore.Signal(object)  # plot data of the other channels (dict)
     _sigNextWavelength = QtCore.Signal()  # internal signal
 
     # declare connectors
@@ -67,7 +72,13 @@ class WavemeterLogic(LogicBase):
 
     # TODO status vars...
     # config options
+    _count_channel_name = ConfigOption(name='count_channel', default=None, missing='nothing')
+    _paused_channel_names = ConfigOption(name='paused_channels', default=list(), missing='nothing')
     _fit_config_model = StatusVar(name='fit_configs', default=list())
+    # display and save all time series channels, not only the count channel
+    _all_channels = StatusVar(name='all_channels', default=False)
+    # plot the other channels on a separate (right) y-axis
+    _separate_y_axes = StatusVar(name='separate_y_axes', default=False)
 
     def __init__(self, *args, **kwargs):
         """
@@ -82,6 +93,12 @@ class WavemeterLogic(LogicBase):
         self._is_wavelength_displaying = False
         self._delay_time = None
         self._stop_flag = False
+        # count channel selected in the GUI (not saved, so every start uses the "count_channel"
+        # ConfigOption as default)
+        self._selected_count_channel = None
+        # column of the count channel within the interleaved time series raw data
+        self._count_channel_index = 0
+        self._count_channel_number = 1
 
         # Data arrays #timings, counts, wavelength, wavelength in Hz
         self._trace_data = np.empty((4, 0), dtype=np.float64)
@@ -89,6 +106,16 @@ class WavemeterLogic(LogicBase):
         self.counts = []
         self.wavelength = []
         self.frequency = []
+        # counts of all time series channels: channel name -> list aligned with self.timings
+        self.channel_counts = dict()
+        self._scan_channels = list()
+        self._scan_count_channel = None
+        # per channel histograms: channel name -> array over histogram_axis
+        self.channel_histogram = dict()
+        self.channel_envelope_histogram = dict()
+        self._channel_rawhisto = dict()
+        self._channel_sumhisto = dict()
+        self._channel_envelope = dict()
 
         self._bins = 200
         self._data_index = 0
@@ -105,6 +132,7 @@ class WavemeterLogic(LogicBase):
         """ Initialisation performed during activation of the module.
         """
         self._fit_container = FitContainer(config_model=self._fit_config_model)
+        self._selected_count_channel = None  # start with the configured default (PFI8)
         self._last_fit_result = None
 
         # connect to time series
@@ -119,6 +147,8 @@ class WavemeterLogic(LogicBase):
 
         self._time_series_logic.sigStatusChanged.connect(
             self._on_time_series_status_changed, QtCore.Qt.QueuedConnection)
+        self._time_series_logic.sigChannelSettingsChanged.connect(
+            self._on_time_series_channels_changed, QtCore.Qt.QueuedConnection)
         return
 
     def on_deactivate(self):
@@ -131,6 +161,8 @@ class WavemeterLogic(LogicBase):
             self.stop_scanning()
 
         self._time_series_logic.sigStatusChanged.disconnect(self._on_time_series_status_changed)
+        self._time_series_logic.sigChannelSettingsChanged.disconnect(
+            self._on_time_series_channels_changed)
         return
 
     @QtCore.Slot(bool, bool)
@@ -138,6 +170,129 @@ class WavemeterLogic(LogicBase):
         """Stop wavemeter scanning when the time series reader stops externally."""
         if not running and self.module_state() == 'locked':
             self.stop_scanning()
+
+    @QtCore.Slot(list, list)
+    def _on_time_series_channels_changed(self, enabled: list, averaged: list) -> None:
+        self.sigCountChannelChanged.emit(list(enabled), self.count_channel or '')
+
+    @property
+    def count_channel_options(self) -> List[str]:
+        """ Time series channels that can be used as count channel (the active ones) """
+        return list(self._time_series_logic.active_channel_names)
+
+    @property
+    def count_channel(self) -> Optional[str]:
+        """ Time series channel used as counts. Selection in the GUI takes precedence over the
+        "count_channel" ConfigOption; falls back to the first active time series channel.
+        """
+        channels = self.count_channel_options
+        for name in (self._selected_count_channel, self._count_channel_name):
+            if name:
+                matches = [ch for ch in channels if ch.lower() == name.lower()]
+                if matches:
+                    return matches[0]
+        return channels[0] if channels else None
+
+    @property
+    def all_channels(self) -> bool:
+        """ Display and save all time series channels, not only the count channel """
+        return bool(self._all_channels)
+
+    @QtCore.Slot(bool)
+    def set_all_channels(self, enabled: bool) -> None:
+        self._all_channels = bool(enabled)
+
+    @property
+    def separate_y_axes(self) -> bool:
+        """ Plot the other channels on their own y-axis (GUI and saved thumbnail) """
+        return bool(self._separate_y_axes)
+
+    @QtCore.Slot(bool)
+    def set_separate_y_axes(self, enabled: bool) -> None:
+        self._separate_y_axes = bool(enabled)
+
+    @property
+    def other_channels(self) -> List[str]:
+        """ Recorded channels other than the count channel of the (last) scan """
+        return [ch for ch in self.channel_counts if ch != self._scan_count_channel]
+
+    def get_channel_plot_data(self, n_points: Optional[int] = None) -> Dict[str, Any]:
+        """ Plot data of the other channels. Only the n_points most recent raw data points are
+        returned (all if None); histograms are always complete.
+        """
+        length = min([len(self.wavelength)] + [len(v) for v in self.channel_counts.values()])
+        start = 0 if n_points is None else max(0, length - n_points)
+        channels = self.other_channels
+        return {
+            'channels': channels,
+            'wavelength': np.asarray(self.wavelength[start:length], dtype=float),
+            'frequency': np.asarray(self.frequency[start:length], dtype=float),
+            'counts': {ch: np.asarray(self.channel_counts[ch][start:length], dtype=float)
+                       for ch in channels},
+            'histogram_axis': self.histogram_axis.copy(),
+            'histogram': {ch: self.channel_histogram.get(ch, np.zeros(self._bins)).copy()
+                          for ch in channels},
+            'envelope': {ch: self.channel_envelope_histogram.get(ch, np.zeros(self._bins)).copy()
+                         for ch in channels},
+        }
+
+    def clear_channel_data(self) -> None:
+        """ Clear the recorded data of all channels and their histograms """
+        self.channel_counts = dict()
+        self._reset_channel_histograms()
+
+    def _append_channel_counts(self, all_counts: np.ndarray) -> None:
+        """ Append a block of time series raw data (samples x self._scan_channels) """
+        previous_length = len(self.timings)
+        for ch in self._scan_channels:
+            if ch not in self.channel_counts:
+                self.channel_counts[ch] = [np.nan] * previous_length
+        for ch, values in self.channel_counts.items():
+            if ch in self._scan_channels:
+                values.extend(all_counts[:, self._scan_channels.index(ch)].tolist())
+            else:
+                values.extend([np.nan] * all_counts.shape[0])
+
+    def _reset_channel_histograms(self) -> None:
+        self.channel_histogram = dict()
+        self.channel_envelope_histogram = dict()
+        self._channel_rawhisto = dict()
+        self._channel_sumhisto = dict()
+        self._channel_envelope = dict()
+
+    def _update_channel_histograms(self, indices: List[int], bins: List[int]) -> None:
+        """ Add the data points at the given indices to the per channel histograms """
+        for ch, values in self.channel_counts.items():
+            if ch not in self._channel_rawhisto or len(self._channel_rawhisto[ch]) != self._bins:
+                self._channel_rawhisto[ch] = np.zeros(self._bins)
+                self._channel_sumhisto[ch] = np.ones(self._bins) * 1.0e-10
+                self._channel_envelope[ch] = np.zeros(self._bins)
+            if indices:
+                idx = np.asarray(indices)
+                new_bins = np.asarray(bins)
+                vals = np.asarray(values[idx[0]:idx[-1] + 1], dtype=float)[idx - idx[0]]
+                valid = np.isfinite(vals)
+                np.add.at(self._channel_rawhisto[ch], new_bins[valid], vals[valid])
+                np.add.at(self._channel_sumhisto[ch], new_bins[valid], 1.0)
+                np.maximum.at(self._channel_envelope[ch], new_bins[valid], vals[valid])
+            histogram = self._channel_rawhisto[ch] / self._channel_sumhisto[ch]
+            envelope = self._channel_envelope[ch].copy()
+            # Bins without valid data of this channel (e.g. paused) while the count channel has
+            # data are no data (NaN, shown as gap) rather than 0
+            no_data = (self._channel_sumhisto[ch] < 0.5) & (self.sumhisto >= 0.5)
+            histogram[no_data] = np.nan
+            envelope[no_data] = np.nan
+            self.channel_histogram[ch] = histogram
+            self.channel_envelope_histogram[ch] = envelope
+
+    @QtCore.Slot(str)
+    def set_count_channel(self, channel: str) -> None:
+        """ Select the time series channel used as counts. Not possible while scanning. """
+        if self.module_state() == 'locked':
+            self.log.warning('Unable to change the count channel while laser scanning.')
+        elif channel:
+            self._selected_count_channel = channel
+        self.sigCountChannelChanged.emit(self.count_channel_options, self.count_channel or '')
 
     @property
     def streamer_constraints(self) -> DataInStreamConstraints:
@@ -155,7 +310,15 @@ class WavemeterLogic(LogicBase):
                 """
         with self.threadlock:
             if self.module_state() == 'locked':
-                # Determine samples to read according to new_count_data size (!one channel only!)
+                # Pick the count channel out of the interleaved time series raw data, but keep
+                # all channels for the "all channels" display/save
+                all_counts = None
+                if new_count_data is not None:
+                    all_counts = np.asarray(new_count_data, dtype=float).reshape(
+                        [-1, self._count_channel_number]
+                    )
+                    new_count_data = all_counts[:, self._count_channel_index]
+                # Determine samples to read according to new_count_data size
                 if new_count_data is not None:
                     samples_to_read_counts = len(new_count_data)
 
@@ -187,6 +350,8 @@ class WavemeterLogic(LogicBase):
                         return
 
                     # Process data
+                    if all_counts is not None:
+                        self._append_channel_counts(all_counts)
                     self._process_data_for_histogram(wavemeter_data, new_count_data, new_timings)
                     self._update_histogram(self.complete_histogram)
 
@@ -198,6 +363,10 @@ class WavemeterLogic(LogicBase):
                     self.sigDataChanged.emit(self.timings[start:], self.counts[start:],
                                              self.wavelength[start:], self.frequency[start:], self.histogram_axis,
                                              self.histogram, self.envelope_histogram)
+                    if self._all_channels:
+                        self.sigChannelDataChanged.emit(
+                            self.get_channel_plot_data(self.number_of_displayed_points)
+                        )
 
                 except TimeoutError as err:
                     self.log.warning(f'Timeout error: {err}')
@@ -236,6 +405,9 @@ class WavemeterLogic(LogicBase):
         binning_axis = np.linspace(self.histogram_axis[0] - offset, self.histogram_axis[-1] + offset,
                                    len(self.histogram_axis) + 1)
 
+        # data indices and bins of the new points, used for the per channel histograms
+        new_indices = list()
+        new_bins = list()
         for i in self.wavelength[self._data_index:]:
             self._data_index += 1  # before because of continue
 
@@ -255,9 +427,12 @@ class WavemeterLogic(LogicBase):
 
             self.envelope_histogram[newbin - 1] = np.max(
                 [self.counts[self._data_index - 1], self.envelope_histogram[newbin - 1]])
+            new_indices.append(self._data_index - 1)
+            new_bins.append(newbin - 1)
 
         # the plot data is the summed counts divided by the occurence of the respective bins
         self.histogram = self.rawhisto / self.sumhisto
+        self._update_channel_histograms(new_indices, new_bins)
         return
 
     @QtCore.Slot()
@@ -276,10 +451,14 @@ class WavemeterLogic(LogicBase):
             self.sigStatusChanged.emit(False)
             return
 
-        if not len(self._time_series_logic.active_channel_names) == 1:
-            self.log.warning('Number of channels of time series data acquisition has to be 1!')
+        time_series_channels = self.count_channel_options
+        count_channel = self.count_channel
+        if count_channel is None:
+            self.log.warning('No active time series channel to use as counts!')
             self.sigStatusChanged.emit(False)
             return
+        paused_channels = [ch for ch in self._paused_channel_names
+                           if ch.lower() != count_channel.lower()]
 
         if len(self._streamer().active_channels) != 1:
             self.log.warning('Only a single wavemeter channel supported.')
@@ -294,6 +473,19 @@ class WavemeterLogic(LogicBase):
             return
 
         self.module_state.lock()
+
+        self._count_channel_index = time_series_channels.index(count_channel)
+        self._count_channel_number = len(time_series_channels)
+        self._scan_channels = list(time_series_channels)
+        self._scan_count_channel = count_channel
+        if paused_channels:
+            try:
+                self._time_series_logic.pause_channels(self.module_name, paused_channels)
+            except Exception:
+                self.log.exception('Unable to pause time series channels:')
+                self.module_state.unlock()
+                self.sigStatusChanged.emit(False)
+                return
 
         self.sigStatusChanged.emit(True)
 
@@ -330,6 +522,11 @@ class WavemeterLogic(LogicBase):
     def _stop_cleanup(self) -> None:
         # save start_time information of high finesse wavemeter
         self.module_state.unlock()
+        if self._paused_channel_names:
+            try:
+                self._time_series_logic.resume_channels(self.module_name)
+            except Exception:
+                self.log.exception('Unable to resume paused time series channels:')
         self._start = time.time()
         self.sigStatusChanged.emit(False)
         self._trace_data = np.vstack(((self.timings, self.counts), (self.wavelength, self.frequency)))
@@ -370,6 +567,7 @@ class WavemeterLogic(LogicBase):
         self.envelope_histogram = np.zeros(self._bins)
         self.sumhisto = np.ones(self._bins) * 1.0e-10
         self.histogram_axis = np.linspace(self._xmin_histo, self._xmax_histo, self._bins)
+        self._reset_channel_histograms()
         self.complete_histogram = True
         if not self.module_state() == 'locked':
             self._update_histogram(self.complete_histogram)
@@ -517,17 +715,40 @@ class WavemeterLogic(LogicBase):
                                 'Min Wavelength Of Histogram (m)': self._xmin_histo,
                                 'Max Wavelength Of Histogram (m)': self._xmax_histo,
                                 'FitResults': fit_container.formatted_result(self._last_fit_result)}
+        parameters = {'Count channel (Flourescence column)': self._scan_count_channel}
 
         file_label = postfix if postfix else 'qdLaserScanning'
 
         header = ['Timings (s)', 'Flourescence (counts/s)', 'Wavelength (m)', 'Frequency (Hz)']
         header_histogram = ['HistogramX', 'HistogramY', 'HistogramEnvelope']
 
+        # Append one column per time series channel (raw data) and a histogram + envelope column
+        # per channel (histogram data)
+        channel_plot_data = None
+        if self._all_channels and self.channel_counts:
+            channels = list(self.channel_counts)
+            length = min([data_set.shape[1]] + [len(v) for v in self.channel_counts.values()])
+            data_set = np.vstack(
+                [data_set[:, :length]] +
+                [np.asarray(self.channel_counts[ch][:length], dtype=float) for ch in channels]
+            )
+            header += [f'{ch} (counts/s)' for ch in channels]
+            for ch in channels:
+                data_set_histogram = np.vstack((
+                    data_set_histogram,
+                    self.channel_histogram.get(ch, np.zeros(self._bins)),
+                    self.channel_envelope_histogram.get(ch, np.zeros(self._bins))
+                ))
+                header_histogram += [f'HistogramY {ch}', f'HistogramEnvelope {ch}']
+            parameters['Channels'] = ', '.join(channels)
+            channel_plot_data = self.get_channel_plot_data()
+
         ds = TextDataStorage(
             root_dir=self.module_default_data_dir if root_dir is None else root_dir,
             column_formats='.15e',
             include_global_metadata=True)
         file_path, _, _ = ds.save_data(data_set.T,
+                                       metadata=parameters,
                                        column_headers=header,
                                        column_dtypes=[float] * len(header),
                                        nametag=file_label)
@@ -535,12 +756,12 @@ class WavemeterLogic(LogicBase):
         file_path, _, _ = ds.save_data(data_set_histogram.T,
                                        metadata=parameters_histogram,
                                        column_headers=header_histogram,
-                                       column_dtypes=[float] * len(header),
+                                       column_dtypes=[float] * len(header_histogram),
                                        nametag=file_label + '_histogram')
 
         # plot graph and save as image alongside data file
         fig = self._plot_figure(self.x_axis_hz_bool, self.get_fit_results(), data_set, data_set_histogram,
-                                fit_container)
+                                fit_container, channel_plot_data, self.separate_y_axes)
         ds.save_thumbnail(fig, file_path=file_path.rsplit('.', 1)[0])
 
         self.log.debug(f'Data saved to: {file_path}')
@@ -548,7 +769,9 @@ class WavemeterLogic(LogicBase):
 
     @staticmethod
     def _plot_figure(x_axis_bool, fitting, data_set, data_set_histogram,
-                     fit_container: FitContainer) -> plt.Figure:
+                     fit_container: FitContainer,
+                     channel_plot_data: Optional[Dict[str, Any]] = None,
+                     separate_y_axes: bool = False) -> plt.Figure:
 
         fit_config, fit_results = fitting
 
@@ -605,13 +828,34 @@ class WavemeterLogic(LogicBase):
                          linewidth=1.5,
                          label='Fit')
 
+        # Other time series channels ("all channels"), optionally on their own y-axis
+        ax2 = None
+        if channel_plot_data and channel_plot_data['channels']:
+            ax2 = ax1.twinx() if separate_y_axes else None
+            ax_ch = ax1 if ax2 is None else ax2
+            x_raw = channel_plot_data['frequency' if x_axis_bool else 'wavelength']
+            x_hist = channel_plot_data['histogram_axis']
+            if x_axis_bool:
+                x_hist = constants.speed_of_light / x_hist
+            colors = ['tab:purple', 'tab:cyan', 'tab:brown', 'tab:pink']
+            for i, ch in enumerate(channel_plot_data['channels']):
+                color = colors[i % len(colors)]
+                ax_ch.plot(x_raw, channel_plot_data['counts'][ch], linestyle=':', linewidth=1,
+                           color=color, alpha=0.6, label=f'RawData {ch}')
+                ax_ch.plot(x_hist, channel_plot_data['histogram'][ch], color=color,
+                           label=f'Histogram {ch}')
+                ax_ch.plot(x_hist, channel_plot_data['envelope'][ch], color=color,
+                           linestyle='--', label=f'Envelope {ch}')
+            if ax2 is not None:
+                ax2.set_ylabel(f'{", ".join(channel_plot_data["channels"])} (counts/s)')
+
         # Do not include fit parameter if there is no fit calculated.
         if fit_result_str:
             # Parameters for the text plot:
             # The position of the text annotation is controlled with the
             # relative offset in x direction and the relative length factor
             # rel_len_fac of the longest entry in one column
-            rel_offset = 0.02
+            rel_offset = 0.02 if ax2 is None else 0.15
             rel_len_fac = 0.011
             entries_per_col = 24
 
@@ -657,7 +901,12 @@ class WavemeterLogic(LogicBase):
 
         ax1.set_ylabel('Flourescence (counts/s)')
 
-        ax1.legend()
+        handles, labels = ax1.get_legend_handles_labels()
+        if ax2 is not None:
+            handles2, labels2 = ax2.get_legend_handles_labels()
+            handles += handles2
+            labels += labels2
+        ax1.legend(handles, labels)
 
         fig.tight_layout()
         return fig

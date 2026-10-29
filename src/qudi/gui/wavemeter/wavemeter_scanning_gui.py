@@ -110,6 +110,17 @@ class WavemeterHistogramMainWindow(QtWidgets.QMainWindow):
         self.save_tag_LineEdit.setToolTip('Enter a nametag which will be\n'
                                           'added to the filename.')
 
+        self.count_channel_ComboBox = QtWidgets.QComboBox()
+        self.count_channel_ComboBox.setSizeAdjustPolicy(
+            QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self.count_channel_ComboBox.setToolTip('Time series channel used as counts for the laser '
+                                               'scan.\nLists the channels active in the time series.')
+        self.all_channels_CheckBox = QtWidgets.QCheckBox('All channels')
+        self.all_channels_CheckBox.setToolTip('Display and save all time series channels, not only '
+                                              'the count channel.\nThe fit uses the count channel.')
+        self.separate_axes_CheckBox = QtWidgets.QCheckBox('Separate y-axes')
+        self.separate_axes_CheckBox.setToolTip('Plot the other channels on their own (right) y-axis.')
+
         # Create menu bar and add actions
         menu_bar = QtWidgets.QMenuBar()
         menu = menu_bar.addMenu('File')
@@ -140,6 +151,11 @@ class WavemeterHistogramMainWindow(QtWidgets.QMainWindow):
         toolbar.addAction(self.actionClear_trace_data)
         toolbar.addAction(self.action_save)
         toolbar.addWidget(self.save_tag_LineEdit)
+        toolbar.addSeparator()
+        toolbar.addWidget(QtWidgets.QLabel(' Count channel: '))
+        toolbar.addWidget(self.count_channel_ComboBox)
+        toolbar.addWidget(self.all_channels_CheckBox)
+        toolbar.addWidget(self.separate_axes_CheckBox)
         toolbar.addSeparator()
         toolbar.addAction(self.action_show_fit_configuration)
         toolbar.addAction(self.show_all_data_action)
@@ -273,6 +289,10 @@ class WavemeterHistogramGui(GuiBase):
         self._wavemeter_logic = None
         self._mw = None
         self._pw = None
+        # second ViewBox (right y-axis) and plot items for the other time series channels
+        self._channel_vb = None
+        self._channel_items = dict()
+        self._channel_items_separate = False
 
         self._fit_config_dialog = None
 
@@ -317,6 +337,18 @@ class WavemeterHistogramGui(GuiBase):
         self._spw.setXLink(self._pw._plot_widget)
         self._spw.addItem(self._scatterplot)
 
+        # Second ViewBox for plotting the other channels with an independent (right) y-axis
+        plot_widget = self._pw._plot_widget
+        self._channel_vb = pg.ViewBox()
+        plot_widget.scene().addItem(self._channel_vb)
+        plot_widget.getAxis('right').linkToView(self._channel_vb)
+        self._channel_vb.setXLink(plot_widget)
+        self._channel_vb.setMouseEnabled(x=False, y=False)
+        self._channel_vb.setMenuEnabled(False)
+        plot_widget.getViewBox().sigResized.connect(self._sync_channel_viewbox)
+        self._channel_items = dict()
+        self._channel_items_separate = False
+
         #####################
         # Connecting file interactions
         self._mw.action_show_fit_configuration.triggered.connect(self._fit_config_dialog.show)
@@ -349,6 +381,22 @@ class WavemeterHistogramGui(GuiBase):
         self._wavemeter_logic.sigStatusChangedDisplaying.connect(
             self.start_clicked_wavemeter, QtCore.Qt.QueuedConnection)
         self._wavemeter_logic.sigFitChanged.connect(self._update_fit_data, QtCore.Qt.QueuedConnection)
+        self._wavemeter_logic.sigCountChannelChanged.connect(self.update_count_channels,
+                                                             QtCore.Qt.QueuedConnection)
+        self.update_count_channels(self._wavemeter_logic.count_channel_options,
+                                   self._wavemeter_logic.count_channel or '')
+        self._mw.count_channel_ComboBox.currentTextChanged.connect(
+            self._wavemeter_logic.set_count_channel, QtCore.Qt.QueuedConnection)
+        # all channels display/save
+        self._mw.all_channels_CheckBox.setChecked(self._wavemeter_logic.all_channels)
+        self._mw.separate_axes_CheckBox.setChecked(self._wavemeter_logic.separate_y_axes)
+        self._mw.separate_axes_CheckBox.setEnabled(self._wavemeter_logic.all_channels)
+        self._mw.all_channels_CheckBox.toggled.connect(self._all_channels_toggled)
+        self._mw.separate_axes_CheckBox.toggled.connect(self._separate_axes_toggled)
+        self._wavemeter_logic.sigChannelDataChanged.connect(self.update_channel_data,
+                                                            QtCore.Qt.QueuedConnection)
+        self._place_channel_items(self._wavemeter_logic.separate_y_axes)
+        self._refresh_channel_plots()
 
         # signal for current wavelength
         self._wavemeter_logic.sigNewWavelength2.connect(self.display_current_wavelength,
@@ -385,6 +433,10 @@ class WavemeterHistogramGui(GuiBase):
         self._mw.restore_default_view_action.triggered.disconnect()
         self._mw.show_all_data_action.triggered.disconnect()
         self._mw.action_fit_envelope_histogram.triggered.disconnect()
+        self._mw.count_channel_ComboBox.currentTextChanged.disconnect()
+        self._mw.all_channels_CheckBox.toggled.disconnect()
+        self._mw.separate_axes_CheckBox.toggled.disconnect()
+        self._pw._plot_widget.getViewBox().sigResized.disconnect(self._sync_channel_viewbox)
 
         self._mw.binSpinBox.editingFinished.disconnect()
         self._mw.maxDoubleSpinBox.editingFinished.disconnect()
@@ -401,6 +453,8 @@ class WavemeterHistogramGui(GuiBase):
         self._wavemeter_logic.sigNewWavelength2.disconnect()
         self._wavemeter_logic.sigStatusChanged.disconnect()
         self._wavemeter_logic.sigFitChanged.disconnect()
+        self._wavemeter_logic.sigCountChannelChanged.disconnect(self.update_count_channels)
+        self._wavemeter_logic.sigChannelDataChanged.disconnect(self.update_channel_data)
 
         self._fit_config_dialog.close()
         self._mw.close()
@@ -471,7 +525,103 @@ class WavemeterHistogramGui(GuiBase):
         self._mw.actionToggle_x_axis.setEnabled(not running)
         self._mw.show_all_data_action.setEnabled(not running)
         self._mw.start_trace_Action2.setEnabled(not running)
+        self._mw.count_channel_ComboBox.setEnabled(not running)
         return
+
+    @QtCore.Slot()
+    def _sync_channel_viewbox(self):
+        """ Keep the right y-axis ViewBox on top of the main plot ViewBox """
+        main_vb = self._pw._plot_widget.getViewBox()
+        self._channel_vb.setGeometry(main_vb.sceneBoundingRect())
+        self._channel_vb.linkedViewChanged(main_vb, self._channel_vb.XAxis)
+
+    @QtCore.Slot(bool)
+    def _all_channels_toggled(self, checked: bool) -> None:
+        self._wavemeter_logic.set_all_channels(checked)
+        self._mw.separate_axes_CheckBox.setEnabled(checked)
+        self._refresh_channel_plots()
+
+    @QtCore.Slot(bool)
+    def _separate_axes_toggled(self, checked: bool) -> None:
+        self._wavemeter_logic.set_separate_y_axes(checked)
+        self._place_channel_items(checked)
+        self._refresh_channel_plots()
+
+    def _get_channel_items(self, channel: str) -> Tuple[pg.ScatterPlotItem, pg.PlotDataItem,
+                                                        pg.PlotDataItem]:
+        """ Plot items (raw data scatter, histogram, envelope) of another channel """
+        if channel not in self._channel_items:
+            self._channel_items[channel] = (
+                pg.ScatterPlotItem(pen=pg.mkPen(palette.c4), brush=pg.mkBrush(palette.c4)),
+                pg.PlotDataItem(pen=pg.mkPen(palette.c5)),
+                pg.PlotDataItem(pen=pg.mkPen(palette.c6, style=QtCore.Qt.PenStyle.DashLine)),
+            )
+            target = self._channel_vb if self._channel_items_separate else self._pw._plot_widget
+            for item in self._channel_items[channel]:
+                target.addItem(item)
+        return self._channel_items[channel]
+
+    def _place_channel_items(self, separate: bool) -> None:
+        """ Move the other channel plot items to the right (separate) or left (common) y-axis """
+        plot_widget = self._pw._plot_widget
+        for items in self._channel_items.values():
+            for item in items:
+                if item in self._channel_vb.addedItems:
+                    self._channel_vb.removeItem(item)
+                if item in plot_widget.getViewBox().addedItems:
+                    plot_widget.removeItem(item)
+                (self._channel_vb if separate else plot_widget).addItem(item)
+        self._channel_items_separate = separate
+
+    def _refresh_channel_plots(self, n_points: Optional[int] = 1000) -> None:
+        """ Redraw the other channels from the logic data (or clear them if disabled) """
+        if self._mw.all_channels_CheckBox.isChecked():
+            self.update_channel_data(self._wavemeter_logic.get_channel_plot_data(n_points))
+        else:
+            self.update_channel_data(None)
+
+    @QtCore.Slot(object)
+    def update_channel_data(self, data) -> None:
+        """ Draw raw data and histograms of the time series channels other than the count channel """
+        plot_widget = self._pw._plot_widget
+        channels = list() if (data is None or not self._mw.all_channels_CheckBox.isChecked()) \
+            else data['channels']
+        # clear plots of channels that are not (or no longer) displayed
+        for ch, items in self._channel_items.items():
+            if ch not in channels:
+                for item in items:
+                    item.clear()
+        separate = self._mw.separate_axes_CheckBox.isChecked() and bool(channels)
+        if separate:
+            plot_widget.showAxis('right')
+            plot_widget.getAxis('right').setLabel(', '.join(channels), units='counts/s')
+        else:
+            plot_widget.hideAxis('right')
+        if not channels:
+            return
+
+        hz = self._wavemeter_logic.x_axis_hz_bool
+        x_raw = data['frequency'] if hz else data['wavelength']
+        x_hist = constants.speed_of_light / data['histogram_axis'] if hz else data['histogram_axis']
+        for ch in channels:
+            scatter, histogram, envelope = self._get_channel_items(ch)
+            y_raw = data['counts'][ch]
+            valid = np.isfinite(x_raw) & np.isfinite(y_raw)
+            scatter.setData(x_raw[valid], y_raw[valid])
+            histogram.setData(x_hist, data['histogram'][ch])
+            envelope.setData(x_hist, data['envelope'][ch])
+
+    @QtCore.Slot(list, str)
+    def update_count_channels(self, channels, selected):
+        """ Refresh the count channel combobox without triggering a new selection """
+        combobox = self._mw.count_channel_ComboBox
+        combobox.blockSignals(True)
+        try:
+            combobox.clear()
+            combobox.addItems(channels)
+            combobox.setCurrentIndex(max(0, combobox.findText(selected)))
+        finally:
+            combobox.blockSignals(False)
 
     @QtCore.Slot()
     def start_clicked(self):
@@ -583,6 +733,7 @@ class WavemeterHistogramGui(GuiBase):
                 min, max = self.region.getRegion()
                 self.region.setRegion([constants.speed_of_light / max, constants.speed_of_light / min])
 
+        self._refresh_channel_plots()
         self._mw.actionToggle_x_axis.setEnabled(True)
         return
 
@@ -653,6 +804,8 @@ class WavemeterHistogramGui(GuiBase):
         self._wavemeter_logic.envelope_histogram = np.zeros(self._wavemeter_logic.histogram_axis.shape)
         self._wavemeter_logic.rawhisto = np.zeros(self._wavemeter_logic.get_bins())
         self._wavemeter_logic.sumhisto = np.ones(self._wavemeter_logic.get_bins()) * 1.0e-10
+        self._wavemeter_logic.clear_channel_data()
+        self._refresh_channel_plots()
         return
 
     def recalculate_histogram(self) -> None:
@@ -691,6 +844,7 @@ class WavemeterHistogramGui(GuiBase):
             x_axis_hz = constants.speed_of_light / self._wavemeter_logic.histogram_axis
             self._pw.set_data('Histogram', x=x_axis_hz, y=self._wavemeter_logic.histogram)
             self._pw.set_data('Envelope', x=x_axis_hz, y=self._wavemeter_logic.envelope_histogram)
+        self._refresh_channel_plots()
 
     @QtCore.Slot()
     def restore_default_view(self):
@@ -744,6 +898,7 @@ class WavemeterHistogramGui(GuiBase):
                 self.curve_data_points.setData(data[2, :], data[1, :])
                 self._scatterplot.setData(data[2, :], data[0, :])
 
+        self._refresh_channel_plots(n_points=None)
         self._mw.show_all_data_action.setEnabled(True)
         return
 
