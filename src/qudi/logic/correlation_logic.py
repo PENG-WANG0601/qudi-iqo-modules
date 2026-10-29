@@ -21,6 +21,7 @@ Example configuration::
             normalization: True
             poll_interval_s: 0.2
             live_fit_interval_s: 1.0  # optional, minimum time between live refits (0 = every poll)
+            fit_curve_decimation: 10  # optional, fit curve has (data points / this) points
         connect:
             counter: 'fast_counter'
 
@@ -43,6 +44,7 @@ If not, see <https://www.gnu.org/licenses/>.
 
 from __future__ import annotations
 
+import re
 import time
 import datetime
 from typing import Optional
@@ -66,9 +68,26 @@ class CorrelationFitContainer(FitContainer):
     parameter of that name.
     """
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, curve_decimation=10, **kwargs):
         super().__init__(*args, **kwargs)
         self.parameter_overrides = dict()  # parameter name -> kwargs for lmfit Parameter.set()
+        self.curve_decimation = curve_decimation
+
+    @staticmethod
+    def _curve_points(x, y, n_points):
+        """ Indices of n_points samples spread evenly along the curve's length (in axis-normalized
+        units) instead of evenly in x: sparse where the curve is flat, dense in a narrow dip/peak,
+        so a sharp antibunching dip keeps its shape with few points.
+        """
+        if x.size <= n_points:
+            return np.arange(x.size)
+        x_span = np.ptp(x) or 1.
+        y_span = np.ptp(y) or 1.
+        seg = np.hypot(np.diff(x) / x_span, np.diff(y) / y_span)
+        arc = np.concatenate(([0.], np.cumsum(seg)))
+        idx = np.searchsorted(arc, np.linspace(0., arc[-1], n_points))
+        return np.unique(np.clip(np.concatenate((idx, [0, x.size - 1, np.argmin(y)])),
+                                 0, x.size - 1))
 
     @QtCore.Slot(str, object, object)
     def fit_data(self, fit_config, x, data):
@@ -93,9 +112,13 @@ class CorrelationFitContainer(FitContainer):
                     if name in parameters:
                         parameters[name].set(**settings)
                 result = model.fit(data, parameters, x=x)
-                high_res_x = np.linspace(x[0], x[-1], len(x) * 10)
-                result.high_res_best_fit = (high_res_x,
-                                            model.eval(**result.best_values, x=high_res_x))
+                # Displayed/saved fit curve: 1/curve_decimation of the data points (drawing a
+                # dense curve on every live fit made the GUI lag), placed along the curve length.
+                x_arr = np.asarray(x, dtype=float)
+                y_fit = model.eval(**result.best_values, x=x_arr)
+                n_points = max(50, x_arr.size // max(1, int(self.curve_decimation)))
+                idx = self._curve_points(x_arr, y_fit, n_points)
+                result.high_res_best_fit = (x_arr[idx], y_fit[idx])
                 self._last_fit_result = result
                 self._last_fit_config = fit_config
             self.sigLastFitResultChanged.emit(self._last_fit_config, self._last_fit_result)
@@ -126,6 +149,8 @@ class CorrelationLogic(LogicBase):
     # Live fit reruns the fit on new data at most this often; 0 = with every data update
     # (poll_interval_s). It runs on this module's thread and delays data polling while it fits.
     _live_fit_interval_s = ConfigOption('live_fit_interval_s', 1.0, missing='nothing')
+    # The fit curve is shown/saved with (number of data points / fit_curve_decimation) points
+    _fit_curve_decimation = ConfigOption('fit_curve_decimation', 10, missing='nothing')
 
     # status vars -- last-used settings, offered back as defaults on the next activation
     acquisition_time_s = StatusVar('acquisition_time_s', default=0.0)
@@ -176,7 +201,8 @@ class CorrelationLogic(LogicBase):
 
         self.fit_config_model = FitConfigurationsModel(parent=self)
         self.fit_config_model.load_configs(self._fit_configs)
-        self.fc = CorrelationFitContainer(parent=self, config_model=self.fit_config_model)
+        self.fc = CorrelationFitContainer(parent=self, config_model=self.fit_config_model,
+                                          curve_decimation=self._fit_curve_decimation)
         self._fit_result = None
         self._fit_config = ''
         self._live_fit_config = ''
@@ -340,16 +366,23 @@ class CorrelationLogic(LogicBase):
         """ Save the currently held tau/g(2) data to a text file, plus a PNG plot of it next to the
         file (same name, .png), including the fit curve if a fit is active.
 
-        @param str tag: optional name tag included in the filename
+        @param str tag: optional measurement name; files are named
+                        <timestamp>_g2_correlation_<tag> and the name is stored in the header
         @param str notes: optional free-text note stored as-is in the file header
         @return str: the path the data was saved to
         """
         if self.tau.size == 0:
             raise RuntimeError('No g(2) data to save yet -- run a measurement first.')
 
+        name = tag.strip() if isinstance(tag, str) else ''
+        # Windows-safe file name part: characters not allowed in file names -> '_'
+        safe_name = re.sub(r'[<>:"/\\|?*\s]+', '_', name).strip('._')
+        nametag = f'g2_correlation_{safe_name}' if safe_name else 'g2_correlation'
+
         data_storage = TextDataStorage(root_dir=self.module_default_data_dir,
                                        image_format=ImageFormat.PNG)
         metadata = {
+            'measurement_name': name,
             'start_channel': self._start_channel,
             'stop_channel': self._stop_channel,
             'window_size_s': self._window_size_s,
@@ -366,7 +399,7 @@ class CorrelationLogic(LogicBase):
         file_path, _, _ = data_storage.save_data(
             data,
             metadata=metadata,
-            nametag=tag or 'g2_correlation',
+            nametag=nametag,
             timestamp=datetime.datetime.now(),
             notes=notes,
             column_headers=('tau (s)', 'g(2)'),
@@ -374,14 +407,14 @@ class CorrelationLogic(LogicBase):
         self.log.info('g(2) data saved to %s', file_path)
 
         try:
-            fig = self._draw_figure(self.tau, self.g2, fit_result)
+            fig = self._draw_figure(self.tau, self.g2, fit_result, name)
             image_path = data_storage.save_thumbnail(fig, file_path=file_path.rsplit('.', 1)[0])
             self.log.info('g(2) plot saved to %s', image_path)
         except Exception:
             self.log.exception('Could not save the g(2) plot image (data file was saved).')
         return file_path
 
-    def _draw_figure(self, tau, g2, fit_result=None) -> Figure:
+    def _draw_figure(self, tau, g2, fit_result=None, name='') -> Figure:
         """ Plot of the g(2) data (and fit curve, if given) for the saved PNG. """
         # Figure instead of pyplot: this runs on the logic thread, pyplot is not thread-safe.
         fig = Figure(figsize=(8, 5), dpi=150)
@@ -392,13 +425,14 @@ class CorrelationLogic(LogicBase):
             ax.plot(np.asarray(fit_x) * 1e9, fit_y, color='tab:red', linewidth=1.5,
                     label=f'fit: {self._fit_config}')
             lines = []
-            for name, param in fit_result.params.items():
-                value = param.value * 1e9 if name in ('t0', 'tau1', 'tau2') else param.value
-                unit = ' ns' if name in ('t0', 'tau1', 'tau2') else ''
+            for param_name, param in fit_result.params.items():
+                is_time = param_name in ('t0', 'tau1', 'tau2')
+                value = param.value * 1e9 if is_time else param.value
+                unit = ' ns' if is_time else ''
                 error = '' if param.stderr is None or not param.vary else (
                     f' ± {param.stderr * 1e9 if unit else param.stderr:.3g}')
                 fixed = '' if param.vary else ' (fixed)'
-                lines.append(f'{name} = {value:.4g}{error}{unit}{fixed}')
+                lines.append(f'{param_name} = {value:.4g}{error}{unit}{fixed}')
             ax.text(0.99, 0.02, '\n'.join(lines), transform=ax.transAxes, ha='right',
                     va='bottom', fontsize=8, family='monospace',
                     bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
@@ -406,7 +440,8 @@ class CorrelationLogic(LogicBase):
         ax.set_xlabel('τ (ns)')
         ax.set_ylabel('g(2)(τ)' if self._normalization else 'coincidences')
         ax.set_xlim(tau[0] * 1e9, tau[-1] * 1e9)
-        ax.set_title(f'g(2): channel {self._start_channel} → channel {self._stop_channel}')
+        title = f'g(2): channel {self._start_channel} → channel {self._stop_channel}'
+        ax.set_title(f'{name}\n{title}' if name else title)
         ax.grid(alpha=0.3)
         return fig
 

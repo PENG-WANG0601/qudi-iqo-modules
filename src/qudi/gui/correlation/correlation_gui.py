@@ -32,6 +32,7 @@ import pyqtgraph as pg
 from PySide6 import QtCore
 
 from qudi.core.connector import Connector
+from qudi.core.statusvariable import StatusVar
 from qudi.core.module import GuiBase
 from qudi.util.colordefs import QudiPalettePale as palette
 from qudi.util.widgets.fitting import FitConfigurationDialog
@@ -54,6 +55,10 @@ class CorrelationGui(GuiBase):
     sigSetLiveFit = QtCore.Signal(str)  # fit config name, '' = off
 
     sigDoFit = QtCore.Signal(str)  # fit config name ('No Fit' clears the fit)
+    sigSave = QtCore.Signal(str)  # measurement name ('' = default file name)
+
+    # last used measurement name, kept across restarts
+    _save_name = StatusVar(name='save_name', default='')
 
     _default_fit_config = 'No Fit'
 
@@ -109,7 +114,9 @@ class CorrelationGui(GuiBase):
 
         # User interactions -> this module's own slots
         self._mw.start_stop_action.triggered[bool].connect(self._start_stop_toggled)
-        self._mw.save_action.triggered.connect(logic.save_data, QtCore.Qt.ConnectionType.QueuedConnection)
+        self._mw.save_name_lineedit.setText(self._save_name)
+        self._mw.save_action.triggered.connect(self._save_clicked)
+        self.sigSave.connect(logic.save_data, QtCore.Qt.ConnectionType.QueuedConnection)
         sw.start_channel_combobox.currentIndexChanged.connect(self._settings_changed)
         sw.stop_channel_combobox.currentIndexChanged.connect(self._settings_changed)
         sw.window_size_spinbox.editingFinished.connect(self._settings_changed)
@@ -140,10 +147,9 @@ class CorrelationGui(GuiBase):
 
     def _activate_fit_ui(self, logic):
         # The fit curve stays on the plot permanently, drawn above the data; "no fit" = empty data.
-        # Only downsampled (it has 10x the data points), not clipped to the view, so it can never
-        # end up hidden by a stale clip range.
+        # It is already reduced in the logic (fit_curve_decimation, unevenly spaced points), so no
+        # pyqtgraph downsampling/clipping here.
         self._fit_curve = pg.PlotDataItem(pen=pg.mkPen(palette.c2, width=2))
-        self._fit_curve.setDownsampling(auto=True, method='mean')
         self._fit_curve.setZValue(10)
         self._mw.g2_plot_widget.addItem(self._fit_curve)
 
@@ -198,6 +204,8 @@ class CorrelationGui(GuiBase):
         self._deactivate_fit_ui(logic)
         self._mw.start_stop_action.triggered[bool].disconnect()
         self._mw.save_action.triggered.disconnect()
+        self.sigSave.disconnect()
+        self._save_name = self._mw.save_name_lineedit.text().strip()
         sw = self._mw.settings_dockwidget
         sw.start_channel_combobox.currentIndexChanged.disconnect()
         sw.stop_channel_combobox.currentIndexChanged.disconnect()
@@ -231,6 +239,10 @@ class CorrelationGui(GuiBase):
             self.sigStart.emit(acquisition_time_s)
         else:
             self.sigStop.emit()
+
+    def _save_clicked(self):
+        self._save_name = self._mw.save_name_lineedit.text().strip()
+        self.sigSave.emit(self._save_name)
 
     def _settings_changed(self):
         sw = self._mw.settings_dockwidget

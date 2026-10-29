@@ -450,8 +450,11 @@ class PulsedMeasurementLogic(LogicBase):
             if channel != self._detection_channel:
                 fastcounter.set_photon_channels([channel])
                 self._detection_channel = channel
-            edge = fastcounter.get_photon_trigger(channel)[1]
-            fastcounter.set_photon_trigger(channel, level_mv, edge)
+            current_level_mv, edge = fastcounter.get_photon_trigger(channel)
+            # Only write when it changes: the counter refuses trigger changes during a g(2)
+            # measurement, and re-applying unchanged pulsed settings must not disturb one.
+            if level_mv is not None and int(level_mv) != int(current_level_mv):
+                fastcounter.set_photon_trigger(channel, level_mv, edge)
             self._detection_level_mv = level_mv
         except Exception:
             self.log.exception('Could not apply detection channel %s / level %s mV.',

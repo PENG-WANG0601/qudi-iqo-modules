@@ -299,6 +299,17 @@ class CorrelationMainWindow(QtWidgets.QMainWindow):
         self.addToolBar(QtCore.Qt.ToolBarArea.TopToolBarArea, self.toolbar)
         self.toolbar.addAction(self.start_stop_action)
         self.toolbar.addAction(self.save_action)
+        self.toolbar.addSeparator()
+        self.toolbar.addWidget(QtWidgets.QLabel(' Measurement name: '))
+        self.save_name_lineedit = QtWidgets.QLineEdit()
+        self.save_name_lineedit.setPlaceholderText('e.g. NV1_10uW')
+        self.save_name_lineedit.setMinimumWidth(200)
+        self.save_name_lineedit.setToolTip(
+            'Name of the current measurement. Added to the saved file names '
+            '(<timestamp>_g2_correlation_<name>.dat/.png) and stored in the file header. '
+            'Leave empty for the plain default name.'
+        )
+        self.toolbar.addWidget(self.save_name_lineedit)
 
         # Menu bar
         menubar = QtWidgets.QMenuBar()
